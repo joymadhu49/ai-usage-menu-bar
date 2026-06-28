@@ -52,6 +52,119 @@ static NSString * const OAuthTokenURL = @"https://platform.claude.com/v1/oauth/t
 static NSString * const ClaudeUsageURL = @"https://api.anthropic.com/api/oauth/usage";
 static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
 
+#pragma mark - Custom menu row views
+
+static CGFloat const AIMRowWidth = 332.0;
+
+// Tints a template image into `rect` with `color` (menu views don't auto-tint).
+static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
+    if (image == nil) { return; }
+    [image drawInRect:rect fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0];
+    [color set];
+    NSRectFillUsingOperation(rect, NSCompositingOperationSourceAtop);
+}
+
+// A provider section header: icon + bold name on the left, a faint plan/status
+// pill on the right.
+@interface AIMHeaderRow : NSView
+@property(nonatomic, strong) NSImage *icon;
+@property(nonatomic, copy) NSString *title;
+@property(nonatomic, copy) NSString *trailing;
+@end
+
+@implementation AIMHeaderRow
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    NSRect b = self.bounds;
+    CGFloat midY = NSMidY(b);
+
+    if (self.icon != nil) {
+        AIMDrawTemplateImage(self.icon, NSMakeRect(14.0, midY - 8.0, 16.0, 16.0), NSColor.labelColor);
+    }
+
+    NSDictionary *titleAttrs = @{
+        NSFontAttributeName: [NSFont systemFontOfSize:13.0 weight:NSFontWeightSemibold],
+        NSForegroundColorAttributeName: NSColor.labelColor
+    };
+    NSSize ts = [self.title sizeWithAttributes:titleAttrs];
+    [self.title drawAtPoint:NSMakePoint(38.0, midY - ts.height / 2.0) withAttributes:titleAttrs];
+
+    if (self.trailing.length > 0) {
+        NSDictionary *pillAttrs = @{
+            NSFontAttributeName: [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold],
+            NSForegroundColorAttributeName: NSColor.secondaryLabelColor
+        };
+        NSSize ps = [self.trailing sizeWithAttributes:pillAttrs];
+        CGFloat padX = 7.0, padY = 2.0;
+        NSRect pill = NSMakeRect(NSMaxX(b) - 16.0 - ps.width - padX * 2.0,
+                                 midY - ps.height / 2.0 - padY,
+                                 ps.width + padX * 2.0, ps.height + padY * 2.0);
+        NSBezierPath *bg = [NSBezierPath bezierPathWithRoundedRect:pill xRadius:pill.size.height / 2.0 yRadius:pill.size.height / 2.0];
+        [[NSColor.secondaryLabelColor colorWithAlphaComponent:0.14] set];
+        [bg fill];
+        [self.trailing drawAtPoint:NSMakePoint(pill.origin.x + padX, midY - ps.height / 2.0) withAttributes:pillAttrs];
+    }
+}
+@end
+
+// A usage row: window label, a rounded progress track filled to `usedPercent`,
+// and a right-aligned value string (e.g. "97% left · 2:00 PM").
+@interface AIMUsageRow : NSView
+@property(nonatomic, copy) NSString *label;
+@property(nonatomic, assign) double usedPercent; // NAN when unknown
+@property(nonatomic, copy) NSString *valueText;
+@end
+
+@implementation AIMUsageRow
+- (NSColor *)severityColor:(double)used {
+    if (used >= 90.0) { return NSColor.systemRedColor; }
+    if (used >= 75.0) { return NSColor.systemOrangeColor; }
+    return NSColor.systemGreenColor;
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    NSRect b = self.bounds;
+    CGFloat midY = NSMidY(b);
+
+    NSDictionary *labelAttrs = @{
+        NSFontAttributeName: [NSFont systemFontOfSize:11.0 weight:NSFontWeightMedium],
+        NSForegroundColorAttributeName: NSColor.secondaryLabelColor
+    };
+    NSSize ls = [self.label sizeWithAttributes:labelAttrs];
+    [self.label drawAtPoint:NSMakePoint(20.0, midY - ls.height / 2.0) withAttributes:labelAttrs];
+
+    NSString *value = self.valueText ?: @"";
+    NSDictionary *valueAttrs = @{
+        NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:11.0 weight:NSFontWeightSemibold],
+        NSForegroundColorAttributeName: NSColor.labelColor
+    };
+    NSSize vs = [value sizeWithAttributes:valueAttrs];
+    CGFloat valueRight = NSMaxX(b) - 16.0;
+    [value drawAtPoint:NSMakePoint(valueRight - vs.width, midY - vs.height / 2.0) withAttributes:valueAttrs];
+
+    CGFloat trackLeft = 64.0;
+    CGFloat trackRight = valueRight - vs.width - 12.0;
+    if (trackRight < trackLeft + 24.0) { trackRight = trackLeft + 24.0; }
+    NSRect track = NSMakeRect(trackLeft, midY - 2.5, trackRight - trackLeft, 5.0);
+    NSBezierPath *trackPath = [NSBezierPath bezierPathWithRoundedRect:track xRadius:2.5 yRadius:2.5];
+    [[NSColor.tertiaryLabelColor colorWithAlphaComponent:0.28] set];
+    [trackPath fill];
+
+    if (!isnan(self.usedPercent)) {
+        double fraction = MAX(0.0, MIN(100.0, self.usedPercent)) / 100.0;
+        CGFloat width = track.size.width * fraction;
+        if (fraction > 0.0 && width < 3.0) { width = 3.0; }
+        if (width > 0.0) {
+            NSRect fill = NSMakeRect(track.origin.x, track.origin.y, width, track.size.height);
+            NSBezierPath *fillPath = [NSBezierPath bezierPathWithRoundedRect:fill xRadius:2.5 yRadius:2.5];
+            [[self severityColor:self.usedPercent] set];
+            [fillPath fill];
+        }
+    }
+}
+@end
+
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate>
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, strong) NSTimer *pollTimer;
@@ -464,6 +577,7 @@ static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
 
     [menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *settingsItem = [[NSMenuItem alloc] initWithTitle:@"Settings" action:nil keyEquivalent:@""];
+    settingsItem.image = [self symbol:@"gearshape"];
     NSMenu *settingsMenu = [[NSMenu alloc] initWithTitle:@"Settings"];
     [self addSettingsToMenu:settingsMenu];
     settingsItem.submenu = settingsMenu;
@@ -474,49 +588,126 @@ static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
 }
 
 - (void)addClaudeSectionToMenu:(NSMenu *)menu {
-    [self addHeader:@"Claude Code" toMenu:menu];
-
     NSDictionary *state = self.claudeState;
     BOOL secondary = [self claudeUsesSecondary];
 
-    [self addDisabledItem:[self claudeDetailUsageTextForState:state] toMenu:menu];
-    if ([state[@"weekly_summary"] isKindOfClass:[NSString class]]) {
-        [self addDisabledItem:state[@"weekly_summary"] toMenu:menu];
-    }
-    if ([state[@"weekly_opus_summary"] isKindOfClass:[NSString class]]) {
-        [self addDisabledItem:state[@"weekly_opus_summary"] toMenu:menu];
-    }
-    [self addDisabledItem:[self resetLineForState:state secondary:secondary claude:YES] toMenu:menu];
-    [self addDisabledItem:[self joinSummaries:@[state[@"plan_summary"], state[@"updated_summary"]]] toMenu:menu];
+    [self addHeaderRowWithIcon:self.claudeIcon
+                         title:@"Claude Code"
+                      trailing:[self planValueForState:state]
+                        toMenu:menu];
 
+    [self addUsageRowWithLabel:@"5h"
+                          used:[self usedPercentForState:state secondary:NO]
+                         value:[self usageValueForState:state secondary:NO claude:YES]
+                       toMenu:menu];
+    [self addUsageRowWithLabel:@"7d"
+                          used:[self usedPercentForState:state secondary:YES]
+                         value:[self usageValueForState:state secondary:YES claude:YES]
+                       toMenu:menu];
+    if ([state[@"weekly_opus_summary"] isKindOfClass:[NSString class]]) {
+        [self addFooterText:state[@"weekly_opus_summary"] toMenu:menu];
+    }
+
+    [self addFooterText:[self joinSummaries:@[state[@"updated_summary"]]] toMenu:menu];
     if (![self stateOK:state] && [state[@"error"] isKindOfClass:[NSString class]]) {
-        [self addDisabledItem:[NSString stringWithFormat:@"Error: %@", state[@"error"]] toMenu:menu];
+        [self addFooterText:[NSString stringWithFormat:@"⚠ %@", state[@"error"]] toMenu:menu];
     }
 }
 
 - (void)addCodexSectionToMenu:(NSMenu *)menu {
-    [self addHeader:@"Codex" toMenu:menu];
-
     NSDictionary *state = self.codexState;
-    BOOL secondary = [self codexUsesSecondary];
 
-    [self addDisabledItem:[self codexDetailUsageTextForState:state] toMenu:menu];
-    if ([state[@"weekly_summary"] isKindOfClass:[NSString class]]) {
-        [self addDisabledItem:state[@"weekly_summary"] toMenu:menu];
-    }
-    [self addDisabledItem:[self resetLineForState:state secondary:secondary claude:NO] toMenu:menu];
+    [self addHeaderRowWithIcon:self.codexIcon
+                         title:@"Codex"
+                      trailing:[self planValueForState:state]
+                        toMenu:menu];
+
+    [self addUsageRowWithLabel:@"Daily"
+                          used:[self usedPercentForState:state secondary:NO]
+                         value:[self usageValueForState:state secondary:NO claude:NO]
+                       toMenu:menu];
+    [self addUsageRowWithLabel:@"Weekly"
+                          used:[self usedPercentForState:state secondary:YES]
+                         value:[self usageValueForState:state secondary:YES claude:NO]
+                       toMenu:menu];
     if ([state[@"monthly_summary"] isKindOfClass:[NSString class]]) {
-        [self addDisabledItem:state[@"monthly_summary"] toMenu:menu];
+        [self addFooterText:state[@"monthly_summary"] toMenu:menu];
     }
-    NSString *meta = [self joinSummaries:@[state[@"plan_summary"], state[@"credits_summary"], state[@"reset_credits_summary"]]];
-    if (meta.length > 0) {
-        [self addDisabledItem:meta toMenu:menu];
-    }
-    [self addDisabledItem:[self joinSummaries:@[state[@"updated_summary"], state[@"source_summary"]]] toMenu:menu];
 
+    NSString *footer = [self joinSummaries:@[state[@"credits_summary"], state[@"reset_credits_summary"], state[@"updated_summary"]]];
+    [self addFooterText:footer toMenu:menu];
     if (![self stateOK:state] && [state[@"error"] isKindOfClass:[NSString class]]) {
-        [self addDisabledItem:[NSString stringWithFormat:@"Error: %@", state[@"error"]] toMenu:menu];
+        [self addFooterText:[NSString stringWithFormat:@"⚠ %@", state[@"error"]] toMenu:menu];
     }
+}
+
+#pragma mark - Styled info rows
+
+- (void)addHeaderRowWithIcon:(NSImage *)icon title:(NSString *)title trailing:(NSString *)trailing toMenu:(NSMenu *)menu {
+    AIMHeaderRow *view = [[AIMHeaderRow alloc] initWithFrame:NSMakeRect(0.0, 0.0, AIMRowWidth, 26.0)];
+    view.autoresizingMask = NSViewWidthSizable;
+    view.icon = icon;
+    view.title = title;
+    view.trailing = trailing;
+    NSMenuItem *item = [[NSMenuItem alloc] init];
+    item.view = view;
+    [menu addItem:item];
+}
+
+- (void)addUsageRowWithLabel:(NSString *)label used:(double)used value:(NSString *)value toMenu:(NSMenu *)menu {
+    AIMUsageRow *view = [[AIMUsageRow alloc] initWithFrame:NSMakeRect(0.0, 0.0, AIMRowWidth, 24.0)];
+    view.autoresizingMask = NSViewWidthSizable;
+    view.label = label;
+    view.usedPercent = used;
+    view.valueText = value;
+    NSMenuItem *item = [[NSMenuItem alloc] init];
+    item.view = view;
+    [menu addItem:item];
+}
+
+- (void)addFooterText:(NSString *)text toMenu:(NSMenu *)menu {
+    if (text.length == 0) { return; }
+    NSMenuItem *item = [[NSMenuItem alloc] init];
+    item.enabled = NO;
+    NSMutableParagraphStyle *p = [[NSMutableParagraphStyle alloc] init];
+    p.firstLineHeadIndent = 20.0;
+    p.headIndent = 20.0;
+    item.attributedTitle = [[NSAttributedString alloc] initWithString:text attributes:@{
+        NSFontAttributeName: [NSFont systemFontOfSize:10.5 weight:NSFontWeightRegular],
+        NSForegroundColorAttributeName: NSColor.tertiaryLabelColor,
+        NSParagraphStyleAttributeName: p
+    }];
+    [menu addItem:item];
+}
+
+// Short value for a usage bar row: "97% left · 2:00 PM" / "3% used · Jul 4" /
+// "idle" when the window has no active reset.
+- (NSString *)usageValueForState:(NSDictionary *)state secondary:(BOOL)secondary claude:(BOOL)claude {
+    double used = [self usedPercentForState:state secondary:secondary];
+    NSString *metric = [self shortMetricTextForUsed:used];
+    NSNumber *reset = [self resetSecondsForState:state secondary:secondary];
+    NSString *clock = [self clockTextForSeconds:reset];
+    if (clock.length == 0) {
+        NSString *missing = claude ? [self claudeMissingResetReasonForState:state secondary:secondary] : @"—";
+        return [NSString stringWithFormat:@"%@ · %@", metric, missing];
+    }
+    return [NSString stringWithFormat:@"%@ · %@", metric, clock];
+}
+
+- (NSString *)shortMetricTextForUsed:(double)used {
+    if (isnan(used)) { return @"—"; }
+    if ([[self metricMode] isEqualToString:MetricModeUsed]) {
+        return [NSString stringWithFormat:@"%.0f%% used", used];
+    }
+    return [NSString stringWithFormat:@"%.0f%% left", MAX(0.0, MIN(100.0, 100.0 - used))];
+}
+
+// The plan name without the "Plan: " prefix, capitalized, for the header pill.
+- (NSString *)planValueForState:(NSDictionary *)state {
+    NSString *summary = state[@"plan_summary"];
+    if (![summary isKindOfClass:[NSString class]] || summary.length == 0) { return nil; }
+    NSString *value = [summary hasPrefix:@"Plan: "] ? [summary substringFromIndex:6] : summary;
+    return [value uppercaseString];
 }
 
 // One compact line: "Resets 2:20 AM (in 2:15:15)" or the idle/unknown reason.
@@ -543,56 +734,68 @@ static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
 }
 
 - (void)addSettingsToMenu:(NSMenu *)menu {
-    [self addChoiceWithTitle:@"Show Percentage" action:@selector(usePercentDisplay)
-                     checked:[[self displayMode] isEqualToString:DisplayModePercent] toMenu:menu];
-    [self addChoiceWithTitle:@"Show Battery" action:@selector(useBatteryDisplay)
-                     checked:[[self displayMode] isEqualToString:DisplayModeBattery] toMenu:menu];
-
-    [menu addItem:[NSMenuItem separatorItem]];
+    [self addSubheader:@"Display" toMenu:menu];
+    [self addChoiceWithTitle:@"Percentage" action:@selector(usePercentDisplay)
+                     checked:[[self displayMode] isEqualToString:DisplayModePercent]
+                       image:[self symbol:@"percent"] toMenu:menu];
+    [self addChoiceWithTitle:@"Battery" action:@selector(useBatteryDisplay)
+                     checked:[[self displayMode] isEqualToString:DisplayModeBattery]
+                       image:[self symbol:@"battery.100"] toMenu:menu];
     [self addChoiceWithTitle:@"Show % Left" action:@selector(useLeftMetric)
-                     checked:[[self metricMode] isEqualToString:MetricModeLeft] toMenu:menu];
+                     checked:[[self metricMode] isEqualToString:MetricModeLeft]
+                       image:[self symbol:@"arrow.down.right.circle"] toMenu:menu];
     [self addChoiceWithTitle:@"Show % Used" action:@selector(useUsedMetric)
-                     checked:[[self metricMode] isEqualToString:MetricModeUsed] toMenu:menu];
+                     checked:[[self metricMode] isEqualToString:MetricModeUsed]
+                       image:[self symbol:@"arrow.up.right.circle"] toMenu:menu];
 
     [menu addItem:[NSMenuItem separatorItem]];
-    [self addChoiceWithTitle:@"In Bar: Claude" action:@selector(toggleShowClaude)
-                     checked:[self boolDefault:ShowClaudeKey] toMenu:menu];
-    [self addChoiceWithTitle:@"In Bar: Codex" action:@selector(toggleShowCodex)
-                     checked:[self boolDefault:ShowCodexKey] toMenu:menu];
+    [self addSubheader:@"Menu Bar" toMenu:menu];
+    [self addChoiceWithTitle:@"Show Claude" action:@selector(toggleShowClaude)
+                     checked:[self boolDefault:ShowClaudeKey] image:self.claudeIcon toMenu:menu];
+    [self addChoiceWithTitle:@"Show Codex" action:@selector(toggleShowCodex)
+                     checked:[self boolDefault:ShowCodexKey] image:self.codexIcon toMenu:menu];
+    [self addChoiceWithTitle:@"Show Reset Time" action:@selector(toggleShowTimeInBar)
+                     checked:[self boolDefault:ShowTimeInBarKey] image:[self symbol:@"clock"] toMenu:menu];
 
     [menu addItem:[NSMenuItem separatorItem]];
-    [self addChoiceWithTitle:@"Claude Window: Session (5h)" action:@selector(useClaudeSession)
-                     checked:[[self claudeWindow] isEqualToString:ClaudeWindowSession] toMenu:menu];
-    [self addChoiceWithTitle:@"Claude Window: Weekly (7d)" action:@selector(useClaudeWeekly)
-                     checked:[[self claudeWindow] isEqualToString:ClaudeWindowWeekly] toMenu:menu];
-    [self addChoiceWithTitle:@"Codex Window: Daily" action:@selector(useCodexDaily)
-                     checked:[[self codexWindow] isEqualToString:CodexWindowDaily] toMenu:menu];
-    [self addChoiceWithTitle:@"Codex Window: Weekly" action:@selector(useCodexWeekly)
-                     checked:[[self codexWindow] isEqualToString:CodexWindowWeekly] toMenu:menu];
+    [self addSubheader:@"Tracked Window" toMenu:menu];
+    [self addChoiceWithTitle:@"Claude — Session (5h)" action:@selector(useClaudeSession)
+                     checked:[[self claudeWindow] isEqualToString:ClaudeWindowSession]
+                       image:[self symbol:@"clock.arrow.circlepath"] toMenu:menu];
+    [self addChoiceWithTitle:@"Claude — Weekly (7d)" action:@selector(useClaudeWeekly)
+                     checked:[[self claudeWindow] isEqualToString:ClaudeWindowWeekly]
+                       image:[self symbol:@"calendar"] toMenu:menu];
+    [self addChoiceWithTitle:@"Codex — Daily" action:@selector(useCodexDaily)
+                     checked:[[self codexWindow] isEqualToString:CodexWindowDaily]
+                       image:[self symbol:@"clock.arrow.circlepath"] toMenu:menu];
+    [self addChoiceWithTitle:@"Codex — Weekly" action:@selector(useCodexWeekly)
+                     checked:[[self codexWindow] isEqualToString:CodexWindowWeekly]
+                       image:[self symbol:@"calendar"] toMenu:menu];
 
     [menu addItem:[NSMenuItem separatorItem]];
-    [self addChoiceWithTitle:@"Show Reset Time" action:@selector(useClockTime)
-                     checked:[[self timeMode] isEqualToString:TimeModeClock] toMenu:menu];
-    [self addChoiceWithTitle:@"Show Countdown" action:@selector(useCountdownTime)
-                     checked:[[self timeMode] isEqualToString:TimeModeCountdown] toMenu:menu];
-    [self addChoiceWithTitle:@"Show Time In Menu Bar" action:@selector(toggleShowTimeInBar)
-                     checked:[self boolDefault:ShowTimeInBarKey] toMenu:menu];
+    [self addSubheader:@"Time Format" toMenu:menu];
+    [self addChoiceWithTitle:@"Reset Time" action:@selector(useClockTime)
+                     checked:[[self timeMode] isEqualToString:TimeModeClock]
+                       image:[self symbol:@"clock"] toMenu:menu];
+    [self addChoiceWithTitle:@"Countdown" action:@selector(useCountdownTime)
+                     checked:[[self timeMode] isEqualToString:TimeModeCountdown]
+                       image:[self symbol:@"timer"] toMenu:menu];
 
     [menu addItem:[NSMenuItem separatorItem]];
     [self addRefreshIntervalSubmenuToMenu:menu];
-
-    [menu addItem:[NSMenuItem separatorItem]];
     [self addChoiceWithTitle:@"Launch at Login" action:@selector(toggleLaunchAtLogin)
-                     checked:[self launchAtLoginEnabled] toMenu:menu];
+                     checked:[self launchAtLoginEnabled] image:[self symbol:@"power"] toMenu:menu];
 }
 
 - (void)addActionsToMenu:(NSMenu *)menu {
     [menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *refresh = [[NSMenuItem alloc] initWithTitle:@"Refresh Now" action:@selector(refresh) keyEquivalent:@"r"];
     refresh.target = self;
+    refresh.image = [self symbol:@"arrow.clockwise"];
     [menu addItem:refresh];
     NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"Quit" action:@selector(quit) keyEquivalent:@"q"];
     quit.target = self;
+    quit.image = [self symbol:@"power"];
     [menu addItem:quit];
 }
 
@@ -605,10 +808,37 @@ static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
 }
 
 - (void)addChoiceWithTitle:(NSString *)title action:(SEL)action checked:(BOOL)checked toMenu:(NSMenu *)menu {
+    [self addChoiceWithTitle:title action:action checked:checked image:nil toMenu:menu];
+}
+
+- (void)addChoiceWithTitle:(NSString *)title action:(SEL)action checked:(BOOL)checked image:(NSImage *)image toMenu:(NSMenu *)menu {
     NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:@""];
     item.target = self;
     item.state = checked ? NSControlStateValueOn : NSControlStateValueOff;
+    item.image = image;
     [menu addItem:item];
+}
+
+// A small uppercase section label inside the Settings submenu.
+- (void)addSubheader:(NSString *)title toMenu:(NSMenu *)menu {
+    NSMenuItem *item = [[NSMenuItem alloc] init];
+    item.enabled = NO;
+    item.attributedTitle = [[NSAttributedString alloc] initWithString:[title uppercaseString] attributes:@{
+        NSFontAttributeName: [NSFont systemFontOfSize:10.0 weight:NSFontWeightSemibold],
+        NSForegroundColorAttributeName: NSColor.tertiaryLabelColor,
+        NSKernAttributeName: @0.5
+    }];
+    [menu addItem:item];
+}
+
+// A template SF Symbol image for menu items (nil on older macOS).
+- (NSImage *)symbol:(NSString *)name {
+    if (@available(macOS 11.0, *)) {
+        NSImage *image = [NSImage imageWithSystemSymbolName:name accessibilityDescription:nil];
+        image.template = YES;
+        return image;
+    }
+    return nil;
 }
 
 - (void)addRefreshIntervalSubmenuToMenu:(NSMenu *)menu {
@@ -616,6 +846,7 @@ static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
     NSMenuItem *root = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Refresh Every: %@",
                                                           [self refreshIntervalLabelForSeconds:current]]
                                                   action:nil keyEquivalent:@""];
+    root.image = [self symbol:@"arrow.clockwise"];
     NSMenu *submenu = [[NSMenu alloc] initWithTitle:@"Refresh Every"];
     for (NSNumber *interval in @[@30.0, @60.0, @180.0, @300.0]) {
         NSTimeInterval seconds = interval.doubleValue;
