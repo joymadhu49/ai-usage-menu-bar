@@ -99,7 +99,11 @@ static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
     self.statusItem.button.image = [self barImage];
     self.statusItem.button.imagePosition = NSImageOnly;
-    self.statusItem.menu = [self menuForCurrentState];
+    // Drive the menu from an explicit action so BOTH left- and right-click open
+    // it (and the menu is always rebuilt fresh against the latest state).
+    self.statusItem.button.target = self;
+    self.statusItem.button.action = @selector(statusItemClicked:);
+    [self.statusItem.button sendActionOn:NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp];
 
     [self refresh];
     [self schedulePollTimer];
@@ -433,14 +437,18 @@ static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
 
 #pragma mark - Menu
 
-- (void)menuWillOpen:(NSMenu *)menu {
-    (void)menu;
+// Show the menu on either mouse button. We temporarily attach the freshly
+// built menu, trigger the button's click (which opens it modally), then detach
+// it so the next click fires this action again rather than auto-opening.
+- (void)statusItemClicked:(id)sender {
+    (void)sender;
     self.statusItem.menu = [self menuForCurrentState];
+    [self.statusItem.button performClick:nil];
+    self.statusItem.menu = nil;
 }
 
 - (NSMenu *)menuForCurrentState {
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"AI Usage"];
-    menu.delegate = self;
 
     [self addHeader:@"AI Usage" toMenu:menu];
     [menu addItem:[NSMenuItem separatorItem]];
@@ -711,9 +719,10 @@ static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
 
 #pragma mark - Menu actions
 
+// Settings change while the menu is open; the menu closes on selection and is
+// rebuilt fresh on the next click, so we only need to refresh the bar image.
 - (void)applyAndRebuild {
     [self updateStatusItem];
-    self.statusItem.menu = [self menuForCurrentState];
 }
 
 - (void)usePercentDisplay { [NSUserDefaults.standardUserDefaults setObject:DisplayModePercent forKey:DisplayModeKey]; [self applyAndRebuild]; }
@@ -747,7 +756,6 @@ static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
     }
     [NSUserDefaults.standardUserDefaults setDouble:interval.doubleValue forKey:RefreshIntervalKey];
     [self schedulePollTimer];
-    self.statusItem.menu = [self menuForCurrentState];
 }
 
 - (void)schedulePollTimer {
@@ -772,7 +780,6 @@ static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
             self.claudeState = claude;
             self.codexState = codex;
             [self updateStatusItem];
-            self.statusItem.menu = [self menuForCurrentState];
         });
     });
 }
@@ -1715,7 +1722,6 @@ static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
     } else {
         self.launchAtLoginError = @"requires macOS 13 or newer";
     }
-    self.statusItem.menu = [self menuForCurrentState];
 }
 
 - (void)quit {
