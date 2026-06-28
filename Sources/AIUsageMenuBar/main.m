@@ -455,7 +455,12 @@ static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
     }
 
     [menu addItem:[NSMenuItem separatorItem]];
-    [self addSettingsToMenu:menu];
+    NSMenuItem *settingsItem = [[NSMenuItem alloc] initWithTitle:@"Settings" action:nil keyEquivalent:@""];
+    NSMenu *settingsMenu = [[NSMenu alloc] initWithTitle:@"Settings"];
+    [self addSettingsToMenu:settingsMenu];
+    settingsItem.submenu = settingsMenu;
+    [menu addItem:settingsItem];
+
     [self addActionsToMenu:menu];
     return menu;
 }
@@ -473,11 +478,8 @@ static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
     if ([state[@"weekly_opus_summary"] isKindOfClass:[NSString class]]) {
         [self addDisabledItem:state[@"weekly_opus_summary"] toMenu:menu];
     }
-    [self addResetAndCountdownForState:state secondary:secondary claude:YES toMenu:menu];
-    if ([state[@"plan_summary"] isKindOfClass:[NSString class]]) {
-        [self addDisabledItem:state[@"plan_summary"] toMenu:menu];
-    }
-    [self addDisabledItem:state[@"updated_summary"] ?: @"Updated: unknown" toMenu:menu];
+    [self addDisabledItem:[self resetLineForState:state secondary:secondary claude:YES] toMenu:menu];
+    [self addDisabledItem:[self joinSummaries:@[state[@"plan_summary"], state[@"updated_summary"]]] toMenu:menu];
 
     if (![self stateOK:state] && [state[@"error"] isKindOfClass:[NSString class]]) {
         [self addDisabledItem:[NSString stringWithFormat:@"Error: %@", state[@"error"]] toMenu:menu];
@@ -494,43 +496,42 @@ static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
     if ([state[@"weekly_summary"] isKindOfClass:[NSString class]]) {
         [self addDisabledItem:state[@"weekly_summary"] toMenu:menu];
     }
-    [self addResetAndCountdownForState:state secondary:secondary claude:NO toMenu:menu];
-    if ([state[@"credits_summary"] isKindOfClass:[NSString class]]) {
-        [self addDisabledItem:state[@"credits_summary"] toMenu:menu];
-    }
-    if ([state[@"reset_credits_summary"] isKindOfClass:[NSString class]]) {
-        [self addDisabledItem:state[@"reset_credits_summary"] toMenu:menu];
-    }
+    [self addDisabledItem:[self resetLineForState:state secondary:secondary claude:NO] toMenu:menu];
     if ([state[@"monthly_summary"] isKindOfClass:[NSString class]]) {
         [self addDisabledItem:state[@"monthly_summary"] toMenu:menu];
     }
-    if ([state[@"plan_summary"] isKindOfClass:[NSString class]]) {
-        [self addDisabledItem:state[@"plan_summary"] toMenu:menu];
+    NSString *meta = [self joinSummaries:@[state[@"plan_summary"], state[@"credits_summary"], state[@"reset_credits_summary"]]];
+    if (meta.length > 0) {
+        [self addDisabledItem:meta toMenu:menu];
     }
-    if ([state[@"limit_summaries"] isKindOfClass:[NSArray class]]) {
-        for (id summary in state[@"limit_summaries"]) {
-            if ([summary isKindOfClass:[NSString class]]) {
-                [self addDisabledItem:summary toMenu:menu];
-            }
-        }
-    }
-    [self addDisabledItem:state[@"updated_summary"] ?: @"Updated: unknown" toMenu:menu];
-    if ([state[@"source_summary"] isKindOfClass:[NSString class]]) {
-        [self addDisabledItem:state[@"source_summary"] toMenu:menu];
-    }
+    [self addDisabledItem:[self joinSummaries:@[state[@"updated_summary"], state[@"source_summary"]]] toMenu:menu];
 
     if (![self stateOK:state] && [state[@"error"] isKindOfClass:[NSString class]]) {
         [self addDisabledItem:[NSString stringWithFormat:@"Error: %@", state[@"error"]] toMenu:menu];
     }
 }
 
-- (void)addResetAndCountdownForState:(NSDictionary *)state secondary:(BOOL)secondary claude:(BOOL)claude toMenu:(NSMenu *)menu {
+// One compact line: "Resets 2:20 AM (in 2:15:15)" or the idle/unknown reason.
+- (NSString *)resetLineForState:(NSDictionary *)state secondary:(BOOL)secondary claude:(BOOL)claude {
     NSNumber *reset = [self resetSecondsForState:state secondary:secondary];
     NSString *clock = [self clockTextForSeconds:reset];
+    if (clock.length == 0) {
+        NSString *missing = claude ? [self claudeMissingResetReasonForState:state secondary:secondary] : @"unknown";
+        return [NSString stringWithFormat:@"Resets: %@", missing];
+    }
     NSString *countdown = [self countdownTextForSeconds:reset];
-    NSString *missing = claude ? [self claudeMissingResetReasonForState:state secondary:secondary] : @"unknown";
-    [self addDisabledItem:[NSString stringWithFormat:@"Reset time: %@", clock.length > 0 ? clock : missing] toMenu:menu];
-    [self addDisabledItem:[NSString stringWithFormat:@"Countdown: %@", countdown.length > 0 ? countdown : missing] toMenu:menu];
+    return [NSString stringWithFormat:@"Resets %@ (in %@)", clock, countdown];
+}
+
+// Joins non-empty summary strings with " · " for a single compact line.
+- (NSString *)joinSummaries:(NSArray *)summaries {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (id s in summaries) {
+        if ([s isKindOfClass:[NSString class]] && [s length] > 0) {
+            [parts addObject:s];
+        }
+    }
+    return [parts componentsJoinedByString:@"  ·  "];
 }
 
 - (void)addSettingsToMenu:(NSMenu *)menu {
