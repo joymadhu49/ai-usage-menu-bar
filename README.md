@@ -22,13 +22,23 @@ status item:
 ## Menu bar
 
 The status item renders a compact readout per provider: the provider icon plus
-its `% left` (or `% used`). A click opens a dropdown with full detail for each:
+its `% left` (or `% used`). The readout turns **orange at 75% used and red at
+90%**, so a glance tells you when you're close to a limit. A click (left or
+right) opens the dropdown:
 
-- **Claude Code** — Session (5h) and Weekly (7d) usage, Weekly (Opus) when
-  present, reset time + live countdown, plan, last-updated.
-- **Codex** — daily and weekly windows, credits / credit resets / monthly limit
-  when present, per-limit summaries, reset time + countdown, plan, source
+- **Claude Code** — 5h and 7d usage as severity-colored progress bars, a 24h
+  history sparkline, Weekly Opus/Sonnet breakdowns and pay-as-you-go extra
+  usage when present, reset time, plan pill, last-updated.
+- **Codex** — its real rate-limit windows (labeled from the actual window
+  durations, e.g. 5h/7d) as progress bars, a 24h sparkline, credits / credit
+  resets / monthly limit when present, reset time, plan pill, source
   (app-server vs. offline JSONL), last-updated.
+
+## Usage alerts
+
+macOS notifications fire once when a tracked window crosses **80%** used and
+again at **95%**, then re-arm after the window resets. Toggle under
+`Settings → Usage Alerts`.
 
 ## Settings (in the dropdown)
 
@@ -40,8 +50,10 @@ its `% left` (or `% used`). A click opens a dropdown with full detail for each:
   Weekly** — which window each provider's bar percentage tracks.
 - **Show Reset Time / Show Countdown** and **Show Time In Menu Bar** — append
   the soonest reset across shown providers to the bar.
+- **Usage Alerts** — enable/disable the 80%/95% notifications.
 - **Refresh Every** — 30s / 1m / 3m / 5m (default 5m).
 - **Launch at Login** — via `SMAppService` (macOS 13+).
+- **Open Dashboard** — jump to claude.ai usage settings or chatgpt.com/codex.
 
 ## Build & install
 

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="AI Usage Menu Bar"
 BUNDLE_ID="com.local.ai-usage-menu-bar"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.2.0}"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/.build/release}"
 APP_DIR="$OUT_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
@@ -23,6 +23,7 @@ env CLANG_MODULE_CACHE_PATH="$ROOT_DIR/.build/module-cache" \
   -framework Cocoa \
   -framework ServiceManagement \
   -framework Security \
+  -framework UserNotifications \
   -O2 \
   -o "$BINARY"
 

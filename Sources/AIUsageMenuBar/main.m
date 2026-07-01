@@ -8,6 +8,7 @@
 #import <Cocoa/Cocoa.h>
 #import <ServiceManagement/ServiceManagement.h>
 #import <Security/Security.h>
+#import <UserNotifications/UserNotifications.h>
 #import <math.h>
 
 #pragma mark - Defaults keys
@@ -38,6 +39,17 @@ static NSString * const ShowTimeInBarKey = @"showTimeInBar";
 
 static NSString * const RefreshIntervalKey = @"refreshIntervalSeconds";
 static NSTimeInterval const DefaultRefreshIntervalSeconds = 300.0;
+
+// Usage alerts: notify once when the tracked window crosses 80%, again at 95%,
+// re-armed once usage falls back below 75% (hysteresis so resets re-arm cleanly).
+static NSString * const AlertsEnabledKey = @"alertsEnabled";
+static NSString * const ClaudeNotifyLevelKey = @"claudeNotifyLevel";
+static NSString * const CodexNotifyLevelKey = @"codexNotifyLevel";
+
+// Rolling 24h of usage samples for the sparkline rows: array of
+// {t: epoch, c: claude 5h used% (-1 when unknown), x: codex primary used%}.
+static NSString * const HistoryKey = @"usageHistory";
+static NSTimeInterval const HistoryWindowSeconds = 24.0 * 3600.0;
 
 // Persisted last-good Claude snapshot, so the bar keeps showing real numbers
 // even while the API is unreachable or rate-limiting us.
@@ -165,6 +177,64 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 }
 @end
 
+// A 24h history sparkline: label on the left, a step-line of used% samples
+// (0..100 vertically) across the last 24 hours on the right.
+@interface AIMSparkRow : NSView
+@property(nonatomic, copy) NSString *label;
+@property(nonatomic, copy) NSArray<NSDictionary *> *points; // {t: epoch, v: used% 0..100}
+@end
+
+@implementation AIMSparkRow
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    NSRect b = self.bounds;
+    CGFloat midY = NSMidY(b);
+
+    NSDictionary *labelAttrs = @{
+        NSFontAttributeName: [NSFont systemFontOfSize:11.0 weight:NSFontWeightMedium],
+        NSForegroundColorAttributeName: NSColor.secondaryLabelColor
+    };
+    NSSize ls = [self.label sizeWithAttributes:labelAttrs];
+    [self.label drawAtPoint:NSMakePoint(20.0, midY - ls.height / 2.0) withAttributes:labelAttrs];
+
+    NSRect plot = NSMakeRect(64.0, 4.0, NSMaxX(b) - 16.0 - 64.0, b.size.height - 8.0);
+    [[NSColor.tertiaryLabelColor colorWithAlphaComponent:0.16] set];
+    [[NSBezierPath bezierPathWithRoundedRect:plot xRadius:3.0 yRadius:3.0] fill];
+
+    if (self.points.count < 2) {
+        return;
+    }
+
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+    NSTimeInterval start = now - HistoryWindowSeconds;
+    NSBezierPath *line = [NSBezierPath bezierPath];
+    line.lineWidth = 1.5;
+    line.lineJoinStyle = NSLineJoinStyleRound;
+    BOOL started = NO;
+    CGFloat lastY = 0.0;
+    for (NSDictionary *p in self.points) {
+        double t = [p[@"t"] doubleValue];
+        double v = [p[@"v"] doubleValue];
+        if (t < start || v < 0.0) { continue; }
+        CGFloat px = plot.origin.x + (CGFloat)((t - start) / HistoryWindowSeconds) * plot.size.width;
+        CGFloat py = plot.origin.y + 1.0 + (CGFloat)(MIN(100.0, v) / 100.0) * (plot.size.height - 2.0);
+        if (!started) {
+            [line moveToPoint:NSMakePoint(px, py)];
+            started = YES;
+        } else {
+            // Step line: hold the previous level until this sample's time.
+            [line lineToPoint:NSMakePoint(px, lastY)];
+            [line lineToPoint:NSMakePoint(px, py)];
+        }
+        lastY = py;
+    }
+    if (started) {
+        [[NSColor.secondaryLabelColor colorWithAlphaComponent:0.9] set];
+        [line stroke];
+    }
+}
+@end
+
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate>
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, strong) NSTimer *pollTimer;
@@ -201,10 +271,12 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         ShowClaudeKey: @YES,
         ShowCodexKey: @YES,
         ShowTimeInBarKey: @NO,
+        AlertsEnabledKey: @YES,
         RefreshIntervalKey: @(DefaultRefreshIntervalSeconds)
     }];
 
     [self restoreClaudeLastGoodState];
+    [self requestNotificationAuthorization];
 
     self.claudeIcon = [self claudeMenuBarIcon];
     self.codexIcon = [self codexMenuBarIcon];
@@ -300,11 +372,26 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 
 #pragma mark - Status bar rendering (composite image of both providers)
 
+// The bar image is drawn with dynamic colors resolved against the status
+// button's appearance (so it adapts to light/dark), which lets us tint a
+// provider's readout orange at >=75% used and red at >=90%.
 - (void)updateStatusItem {
-    self.statusItem.button.image = [self barImage];
+    NSAppearance *appearance = self.statusItem.button.effectiveAppearance ?: NSApp.effectiveAppearance;
+    __block NSImage *image = nil;
+    [appearance performAsCurrentDrawingAppearance:^{
+        image = [self barImage];
+    }];
+    self.statusItem.button.image = image;
 }
 
-// Builds one template image: [claudeIcon 45%]  [codexIcon 12%]  (+ optional time).
+// Orange when the window is >=75% used, red at >=90%, otherwise normal text.
+- (NSColor *)barSeverityColorForUsed:(double)used {
+    if (!isnan(used) && used >= 90.0) { return NSColor.systemRedColor; }
+    if (!isnan(used) && used >= 75.0) { return NSColor.systemOrangeColor; }
+    return NSColor.labelColor;
+}
+
+// Builds one composite image: [claudeIcon 45%]  [codexIcon 12%]  (+ optional time).
 - (NSImage *)barImage {
     BOOL showClaude = [self boolDefault:ShowClaudeKey];
     BOOL showCodex = [self boolDefault:ShowCodexKey];
@@ -314,13 +401,15 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     if (showClaude) {
         [readouts addObject:@{
             @"icon": self.claudeIcon ?: [NSNull null],
-            @"metric": @([self barMetricForState:self.claudeState secondary:[self claudeUsesSecondary]])
+            @"metric": @([self barMetricForState:self.claudeState secondary:[self claudeUsesSecondary]]),
+            @"used": @([self stateOK:self.claudeState] ? [self usedPercentForState:self.claudeState secondary:[self claudeUsesSecondary]] : NAN)
         }];
     }
     if (showCodex) {
         [readouts addObject:@{
             @"icon": self.codexIcon ?: [NSNull null],
-            @"metric": @([self barMetricForState:self.codexState secondary:[self codexUsesSecondary]])
+            @"metric": @([self barMetricForState:self.codexState secondary:[self codexUsesSecondary]]),
+            @"used": @([self stateOK:self.codexState] ? [self usedPercentForState:self.codexState secondary:[self codexUsesSecondary]] : NAN)
         }];
     }
     if (readouts.count == 0) {
@@ -329,10 +418,8 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 
     NSString *timeText = [self boolDefault:ShowTimeInBarKey] ? [self barTimeText] : nil;
 
-    NSDictionary *textAttrs = @{
-        NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:12.5 weight:NSFontWeightSemibold],
-        NSForegroundColorAttributeName: NSColor.blackColor
-    };
+    NSFont *font = [NSFont monospacedDigitSystemFontOfSize:12.5 weight:NSFontWeightSemibold];
+    NSDictionary *measureAttrs = @{ NSFontAttributeName: font };
 
     CGFloat height = 18.0;
     CGFloat iconSize = 15.0;
@@ -350,7 +437,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
             [metricSizes addObject:[NSValue valueWithSize:NSZeroSize]];
         } else {
             NSString *text = [self metricTextForValue:[r[@"metric"] doubleValue]];
-            NSSize s = [text sizeWithAttributes:textAttrs];
+            NSSize s = [text sizeWithAttributes:measureAttrs];
             [metricSizes addObject:[NSValue valueWithSize:s]];
             width += s.width;
         }
@@ -359,77 +446,81 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     width -= gapProviders; // no trailing gap after last provider
     NSSize timeSize = NSZeroSize;
     if (timeText.length > 0) {
-        timeSize = [timeText sizeWithAttributes:textAttrs];
+        timeSize = [timeText sizeWithAttributes:measureAttrs];
         width += gapProviders + timeSize.width;
     }
     width += 2.0;
 
     NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(ceil(width), height)];
     [image lockFocus];
-    [NSColor.blackColor set];
 
     CGFloat x = 2.0;
     for (NSUInteger i = 0; i < readouts.count; i++) {
         NSDictionary *r = readouts[i];
+        double used = [r[@"used"] doubleValue];
+        NSColor *color = [self barSeverityColorForUsed:used];
+
         id icon = r[@"icon"];
         if ([icon isKindOfClass:[NSImage class]]) {
-            [(NSImage *)icon drawInRect:NSMakeRect(x, (height - iconSize) / 2.0, iconSize, iconSize)
-                               fromRect:NSZeroRect
-                              operation:NSCompositingOperationSourceOver
-                               fraction:1.0];
+            AIMDrawTemplateImage((NSImage *)icon,
+                                 NSMakeRect(x, (height - iconSize) / 2.0, iconSize, iconSize),
+                                 NSColor.labelColor);
         }
         x += iconSize + gapIconText;
 
         double metric = [r[@"metric"] doubleValue];
         if (battery) {
-            [self drawBatteryInRect:NSMakeRect(x, (height - 12.0) / 2.0, batteryWidth, 12.0) percent:metric];
+            [self drawBatteryInRect:NSMakeRect(x, (height - 12.0) / 2.0, batteryWidth, 12.0)
+                            percent:metric
+                              color:color];
             x += batteryWidth;
         } else {
             NSString *text = [self metricTextForValue:metric];
             NSSize s = [metricSizes[i] sizeValue];
-            [text drawAtPoint:NSMakePoint(x, (height - s.height) / 2.0) withAttributes:textAttrs];
+            [text drawAtPoint:NSMakePoint(x, (height - s.height) / 2.0)
+               withAttributes:@{ NSFontAttributeName: font, NSForegroundColorAttributeName: color }];
             x += s.width;
         }
         x += gapProviders;
     }
 
     if (timeText.length > 0) {
-        x -= gapProviders; // align after the trimmed trailing gap
-        x += gapProviders;
-        [timeText drawAtPoint:NSMakePoint(x, (height - timeSize.height) / 2.0) withAttributes:textAttrs];
+        [timeText drawAtPoint:NSMakePoint(x, (height - timeSize.height) / 2.0)
+           withAttributes:@{ NSFontAttributeName: font, NSForegroundColorAttributeName: NSColor.labelColor }];
     }
 
     [image unlockFocus];
-    image.template = YES;
+    image.template = NO;
     return image;
 }
 
 - (NSImage *)labelImage:(NSString *)label {
     NSDictionary *attrs = @{
         NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:12.5 weight:NSFontWeightSemibold],
-        NSForegroundColorAttributeName: NSColor.blackColor
+        NSForegroundColorAttributeName: NSColor.labelColor
     };
     NSSize s = [label sizeWithAttributes:attrs];
     NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(ceil(s.width) + 4.0, 18.0)];
     [image lockFocus];
     [label drawAtPoint:NSMakePoint(2.0, (18.0 - s.height) / 2.0) withAttributes:attrs];
     [image unlockFocus];
-    image.template = YES;
+    image.template = NO;
     return image;
 }
 
 // Battery glyph with the percent number inside, drawn into the current context.
-- (void)drawBatteryInRect:(NSRect)body percent:(double)percent {
+- (void)drawBatteryInRect:(NSRect)body percent:(double)percent color:(NSColor *)color {
     if (isnan(percent)) {
         NSDictionary *attrs = @{
             NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:9.0 weight:NSFontWeightSemibold],
-            NSForegroundColorAttributeName: NSColor.blackColor
+            NSForegroundColorAttributeName: NSColor.labelColor
         };
         [@"--" drawAtPoint:NSMakePoint(body.origin.x + 4.0, body.origin.y) withAttributes:attrs];
         return;
     }
     double clamped = MAX(0.0, MIN(100.0, percent));
 
+    [NSColor.labelColor set];
     NSBezierPath *outline = [NSBezierPath bezierPathWithRoundedRect:body xRadius:2.0 yRadius:2.0];
     outline.lineWidth = 1.4;
     [outline stroke];
@@ -439,6 +530,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 
     CGFloat fillWidth = (CGFloat)((body.size.width - 4.0) * (clamped / 100.0));
     if (fillWidth > 0.5) {
+        [(color ?: NSColor.labelColor) set];
         NSRect fillRect = NSMakeRect(body.origin.x + 2.0, body.origin.y + 2.0, fillWidth, body.size.height - 4.0);
         [[NSBezierPath bezierPathWithRoundedRect:fillRect xRadius:1.0 yRadius:1.0] fill];
     }
@@ -446,7 +538,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     NSString *number = [NSString stringWithFormat:@"%.0f", clamped];
     NSDictionary *attributes = @{
         NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:8.5 weight:NSFontWeightSemibold],
-        NSForegroundColorAttributeName: NSColor.blackColor
+        NSForegroundColorAttributeName: NSColor.labelColor
     };
     NSSize numberSize = [number sizeWithAttributes:attributes];
     NSPoint numberPoint = NSMakePoint(NSMidX(body) - numberSize.width / 2.0,
@@ -604,8 +696,15 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
                           used:[self usedPercentForState:state secondary:YES]
                          value:[self usageValueForState:state secondary:YES claude:YES]
                        toMenu:menu];
+    [self addSparkRowForField:@"c" toMenu:menu];
     if ([state[@"weekly_opus_summary"] isKindOfClass:[NSString class]]) {
         [self addFooterText:state[@"weekly_opus_summary"] toMenu:menu];
+    }
+    if ([state[@"weekly_sonnet_summary"] isKindOfClass:[NSString class]]) {
+        [self addFooterText:state[@"weekly_sonnet_summary"] toMenu:menu];
+    }
+    if ([state[@"extra_summary"] isKindOfClass:[NSString class]]) {
+        [self addFooterText:state[@"extra_summary"] toMenu:menu];
     }
 
     [self addFooterText:[self joinSummaries:@[state[@"updated_summary"]]] toMenu:menu];
@@ -622,14 +721,17 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
                       trailing:[self planValueForState:state]
                         toMenu:menu];
 
-    [self addUsageRowWithLabel:@"Daily"
+    NSString *primaryLabel = [state[@"primary_window_label"] isKindOfClass:[NSString class]] ? state[@"primary_window_label"] : @"5h";
+    NSString *secondaryLabel = [state[@"secondary_window_label"] isKindOfClass:[NSString class]] ? state[@"secondary_window_label"] : @"7d";
+    [self addUsageRowWithLabel:primaryLabel
                           used:[self usedPercentForState:state secondary:NO]
                          value:[self usageValueForState:state secondary:NO claude:NO]
                        toMenu:menu];
-    [self addUsageRowWithLabel:@"Weekly"
+    [self addUsageRowWithLabel:secondaryLabel
                           used:[self usedPercentForState:state secondary:YES]
                          value:[self usageValueForState:state secondary:YES claude:NO]
                        toMenu:menu];
+    [self addSparkRowForField:@"x" toMenu:menu];
     if ([state[@"monthly_summary"] isKindOfClass:[NSString class]]) {
         [self addFooterText:state[@"monthly_summary"] toMenu:menu];
     }
@@ -660,6 +762,21 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     view.label = label;
     view.usedPercent = used;
     view.valueText = value;
+    NSMenuItem *item = [[NSMenuItem alloc] init];
+    item.view = view;
+    [menu addItem:item];
+}
+
+// Adds a 24h history sparkline for one provider once enough samples exist.
+- (void)addSparkRowForField:(NSString *)field toMenu:(NSMenu *)menu {
+    NSArray<NSDictionary *> *points = [self historyPointsForField:field];
+    if (points.count < 3) {
+        return;
+    }
+    AIMSparkRow *view = [[AIMSparkRow alloc] initWithFrame:NSMakeRect(0.0, 0.0, AIMRowWidth, 22.0)];
+    view.autoresizingMask = NSViewWidthSizable;
+    view.label = @"24h";
+    view.points = points;
     NSMenuItem *item = [[NSMenuItem alloc] init];
     item.view = view;
     [menu addItem:item];
@@ -765,10 +882,10 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     [self addChoiceWithTitle:@"Claude — Weekly (7d)" action:@selector(useClaudeWeekly)
                      checked:[[self claudeWindow] isEqualToString:ClaudeWindowWeekly]
                        image:[self symbol:@"calendar"] toMenu:menu];
-    [self addChoiceWithTitle:@"Codex — Daily" action:@selector(useCodexDaily)
+    [self addChoiceWithTitle:@"Codex — Session (5h)" action:@selector(useCodexDaily)
                      checked:[[self codexWindow] isEqualToString:CodexWindowDaily]
                        image:[self symbol:@"clock.arrow.circlepath"] toMenu:menu];
-    [self addChoiceWithTitle:@"Codex — Weekly" action:@selector(useCodexWeekly)
+    [self addChoiceWithTitle:@"Codex — Weekly (7d)" action:@selector(useCodexWeekly)
                      checked:[[self codexWindow] isEqualToString:CodexWindowWeekly]
                        image:[self symbol:@"calendar"] toMenu:menu];
 
@@ -782,6 +899,8 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
                        image:[self symbol:@"timer"] toMenu:menu];
 
     [menu addItem:[NSMenuItem separatorItem]];
+    [self addChoiceWithTitle:@"Usage Alerts (80% / 95%)" action:@selector(toggleAlerts)
+                     checked:[self boolDefault:AlertsEnabledKey] image:[self symbol:@"bell"] toMenu:menu];
     [self addRefreshIntervalSubmenuToMenu:menu];
     [self addChoiceWithTitle:@"Launch at Login" action:@selector(toggleLaunchAtLogin)
                      checked:[self launchAtLoginEnabled] image:[self symbol:@"power"] toMenu:menu];
@@ -789,6 +908,25 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 
 - (void)addActionsToMenu:(NSMenu *)menu {
     [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *dashboards = [[NSMenuItem alloc] initWithTitle:@"Open Dashboard" action:nil keyEquivalent:@""];
+    dashboards.image = [self symbol:@"safari"];
+    NSMenu *dashMenu = [[NSMenu alloc] initWithTitle:@"Open Dashboard"];
+    NSMenuItem *claudeDash = [[NSMenuItem alloc] initWithTitle:@"Claude — claude.ai/settings/usage"
+                                                        action:@selector(openDashboard:) keyEquivalent:@""];
+    claudeDash.target = self;
+    claudeDash.image = self.claudeIcon;
+    claudeDash.representedObject = @"https://claude.ai/settings/usage";
+    [dashMenu addItem:claudeDash];
+    NSMenuItem *codexDash = [[NSMenuItem alloc] initWithTitle:@"Codex — chatgpt.com/codex"
+                                                       action:@selector(openDashboard:) keyEquivalent:@""];
+    codexDash.target = self;
+    codexDash.image = self.codexIcon;
+    codexDash.representedObject = @"https://chatgpt.com/codex";
+    [dashMenu addItem:codexDash];
+    dashboards.submenu = dashMenu;
+    [menu addItem:dashboards];
+
     NSMenuItem *refresh = [[NSMenuItem alloc] initWithTitle:@"Refresh Now" action:@selector(refresh) keyEquivalent:@"r"];
     refresh.target = self;
     refresh.image = [self symbol:@"arrow.clockwise"];
@@ -980,6 +1118,23 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     [self applyAndRebuild];
 }
 
+- (void)toggleAlerts {
+    BOOL enabled = ![self boolDefault:AlertsEnabledKey];
+    [NSUserDefaults.standardUserDefaults setBool:enabled forKey:AlertsEnabledKey];
+    if (enabled) {
+        [self requestNotificationAuthorization];
+    }
+    [self applyAndRebuild];
+}
+
+- (void)openDashboard:(NSMenuItem *)sender {
+    NSString *urlString = [sender.representedObject isKindOfClass:[NSString class]] ? sender.representedObject : nil;
+    NSURL *url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
+    if (url != nil) {
+        [NSWorkspace.sharedWorkspace openURL:url];
+    }
+}
+
 - (void)useRefreshInterval:(NSMenuItem *)sender {
     NSNumber *interval = sender.representedObject;
     if (![interval respondsToSelector:@selector(doubleValue)]) {
@@ -1011,8 +1166,136 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
             self.claudeState = claude;
             self.codexState = codex;
             [self updateStatusItem];
+            [self recordHistorySample];
+            [self evaluateAlerts];
         });
     });
+}
+
+#pragma mark - Usage alerts
+
+- (void)requestNotificationAuthorization {
+    // UNUserNotificationCenter requires a real bundle; guard for safety.
+    if (NSBundle.mainBundle.bundleIdentifier == nil) {
+        return;
+    }
+    UNUserNotificationCenter *center = UNUserNotificationCenter.currentNotificationCenter;
+    [center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound)
+                          completionHandler:^(BOOL granted, NSError *error) {
+        (void)granted;
+        (void)error;
+    }];
+}
+
+- (void)evaluateAlerts {
+    if (![self boolDefault:AlertsEnabledKey]) {
+        return;
+    }
+    [self evaluateAlertNamed:@"Claude Code"
+                       state:self.claudeState
+                   secondary:[self claudeUsesSecondary]
+                  defaultKey:ClaudeNotifyLevelKey];
+    [self evaluateAlertNamed:@"Codex"
+                       state:self.codexState
+                   secondary:[self codexUsesSecondary]
+                  defaultKey:CodexNotifyLevelKey];
+}
+
+// Fires once at 80% and once at 95% of the tracked window; re-arms when usage
+// drops back below 75% (i.e. after the window resets).
+- (void)evaluateAlertNamed:(NSString *)name state:(NSDictionary *)state secondary:(BOOL)secondary defaultKey:(NSString *)key {
+    if (![self stateOK:state]) {
+        return;
+    }
+    double used = [self usedPercentForState:state secondary:secondary];
+    if (isnan(used)) {
+        return;
+    }
+
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSInteger last = [defaults integerForKey:key];
+    if (used < 75.0) {
+        if (last != 0) {
+            [defaults setInteger:0 forKey:key];
+        }
+        return;
+    }
+
+    NSInteger level = used >= 95.0 ? 95 : (used >= 80.0 ? 80 : 0);
+    if (level == 0 || level <= last) {
+        return;
+    }
+    [defaults setInteger:level forKey:key];
+
+    NSString *clock = [self clockTextForSeconds:[self resetSecondsForState:state secondary:secondary]];
+    NSString *body = clock.length > 0
+        ? [NSString stringWithFormat:@"%.0f%% of the window is used. Resets %@.", used, clock]
+        : [NSString stringWithFormat:@"%.0f%% of the window is used.", used];
+    [self postNotificationWithTitle:[NSString stringWithFormat:@"%@ usage at %ld%%", name, (long)level]
+                               body:body];
+}
+
+- (void)postNotificationWithTitle:(NSString *)title body:(NSString *)body {
+    if (NSBundle.mainBundle.bundleIdentifier == nil) {
+        return;
+    }
+    UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
+    content.title = title;
+    content.body = body;
+    UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:NSUUID.UUID.UUIDString
+                                                                          content:content
+                                                                          trigger:nil];
+    [UNUserNotificationCenter.currentNotificationCenter addNotificationRequest:request
+                                                          withCompletionHandler:^(NSError *error) {
+        (void)error;
+    }];
+}
+
+#pragma mark - Usage history (24h sparkline)
+
+// Appends the current primary-window used% of both providers and prunes
+// anything older than the sparkline window.
+- (void)recordHistorySample {
+    double claudeUsed = [self stateOK:self.claudeState] ? [self usedPercentForState:self.claudeState secondary:NO] : NAN;
+    double codexUsed = [self stateOK:self.codexState] ? [self usedPercentForState:self.codexState secondary:NO] : NAN;
+    if (isnan(claudeUsed) && isnan(codexUsed)) {
+        return;
+    }
+
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSArray *saved = [defaults arrayForKey:HistoryKey] ?: @[];
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+    NSTimeInterval cutoff = now - HistoryWindowSeconds;
+
+    NSMutableArray *history = [NSMutableArray array];
+    for (id entry in saved) {
+        if ([entry isKindOfClass:[NSDictionary class]] && [entry[@"t"] doubleValue] >= cutoff) {
+            [history addObject:entry];
+        }
+    }
+    [history addObject:@{
+        @"t": @(now),
+        @"c": @(isnan(claudeUsed) ? -1.0 : claudeUsed),
+        @"x": @(isnan(codexUsed) ? -1.0 : codexUsed)
+    }];
+    // Hard cap as a safety net against pathological refresh rates.
+    while (history.count > 4000) {
+        [history removeObjectAtIndex:0];
+    }
+    [defaults setObject:history forKey:HistoryKey];
+}
+
+// History points for one provider ('c' = Claude, 'x' = Codex) as {t, v} pairs.
+- (NSArray<NSDictionary *> *)historyPointsForField:(NSString *)field {
+    NSArray *saved = [NSUserDefaults.standardUserDefaults arrayForKey:HistoryKey] ?: @[];
+    NSMutableArray<NSDictionary *> *points = [NSMutableArray array];
+    for (id entry in saved) {
+        if (![entry isKindOfClass:[NSDictionary class]]) { continue; }
+        double v = [entry[field] doubleValue];
+        if (v < 0.0) { continue; }
+        [points addObject:@{ @"t": entry[@"t"] ?: @0, @"v": @(v) }];
+    }
+    return points;
 }
 
 #pragma mark - Claude data source: OAuth usage API
@@ -1181,10 +1464,49 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         if (opus.length > 0) { state[@"weekly_opus_summary"] = opus; }
     }
 
+    NSDictionary *sevenDaySonnet = [response[@"seven_day_sonnet"] isKindOfClass:[NSDictionary class]] ? response[@"seven_day_sonnet"] : nil;
+    NSNumber *sonnetUsed = [self utilizationPercentFromWindow:sevenDaySonnet];
+    if (sonnetUsed != nil && sonnetUsed.doubleValue > 0.0) {
+        NSString *sonnet = [self windowSummaryWithLabel:@"Weekly (Sonnet)"
+                                                   used:sonnetUsed
+                                                  reset:[self resetEpochFromWindow:sevenDaySonnet]
+                                            includeDate:YES];
+        if (sonnet.length > 0) { state[@"weekly_sonnet_summary"] = sonnet; }
+    }
+
+    NSString *extra = [self extraUsageSummaryFromResponse:response];
+    if (extra.length > 0) {
+        state[@"extra_summary"] = extra;
+    }
+
     if (plan.length > 0) {
         state[@"plan_summary"] = [NSString stringWithFormat:@"Plan: %@", [plan capitalizedString]];
     }
     return state;
+}
+
+// Pay-as-you-go extra usage: "Extra usage: $387.46 of $2,000 (19%)".
+// used_credits/monthly_limit are integers scaled by decimal_places.
+- (NSString *)extraUsageSummaryFromResponse:(NSDictionary *)response {
+    NSDictionary *extra = [response[@"extra_usage"] isKindOfClass:[NSDictionary class]] ? response[@"extra_usage"] : nil;
+    if (extra == nil) {
+        return nil;
+    }
+    NSNumber *enabled = [extra[@"is_enabled"] respondsToSelector:@selector(boolValue)] ? extra[@"is_enabled"] : nil;
+    if (enabled != nil && !enabled.boolValue) {
+        return nil;
+    }
+    NSNumber *usedCredits = [self numberFromDictionary:extra keys:@[@"used_credits"]];
+    NSNumber *monthlyLimit = [self numberFromDictionary:extra keys:@[@"monthly_limit"]];
+    if (usedCredits == nil || monthlyLimit == nil || monthlyLimit.doubleValue <= 0.0) {
+        return nil;
+    }
+    NSNumber *decimalPlaces = [self numberFromDictionary:extra keys:@[@"decimal_places"]];
+    double divisor = pow(10.0, decimalPlaces != nil ? decimalPlaces.doubleValue : 2.0);
+    double used = usedCredits.doubleValue / divisor;
+    double limit = monthlyLimit.doubleValue / divisor;
+    double percent = MAX(0.0, MIN(100.0, used / limit * 100.0));
+    return [NSString stringWithFormat:@"Extra usage: $%.2f of $%.0f (%.0f%%)", used, limit, percent];
 }
 
 - (NSNumber *)utilizationPercentFromWindow:(NSDictionary *)window {
@@ -1226,6 +1548,9 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     } else {
         double leftValue = MAX(0.0, MIN(100.0, 100.0 - usedValue));
         usedText = [NSString stringWithFormat:@"%.0f%% left, %.0f%% used", leftValue, usedValue];
+    }
+    if (reset == nil) {
+        return [NSString stringWithFormat:@"%@: %@", label, usedText];
     }
     return [NSString stringWithFormat:@"%@: %@, resets %@", label, usedText, [self resetLabelForSeconds:reset includeDate:includeDate]];
 }
@@ -1727,6 +2052,15 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     if (primaryReset != nil) { state[@"primary_resets_at"] = primaryReset; }
     if (secondaryUsed != nil) { state[@"secondary_used_percent"] = secondaryUsed; }
     if (secondaryReset != nil) { state[@"secondary_resets_at"] = secondaryReset; }
+
+    // Real window durations (e.g. 300 min -> "5h", 10080 -> "7d") so the menu
+    // labels the windows accurately instead of assuming "daily".
+    if (primary != nil) {
+        state[@"primary_window_label"] = [self windowLabelForWindow:primary appServerKeys:appServerKeys];
+    }
+    if (secondary != nil) {
+        state[@"secondary_window_label"] = [self windowLabelForWindow:secondary appServerKeys:appServerKeys];
+    }
 
     NSString *weekly = [self codexWeeklySummary:secondary appServerKeys:appServerKeys];
     if (weekly.length > 0) { state[@"weekly_summary"] = weekly; }
