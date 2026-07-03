@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="AI Usage Menu Bar"
 BUNDLE_ID="com.local.ai-usage-menu-bar"
-VERSION="${VERSION:-0.2.0}"
+VERSION="${VERSION:-0.3.0}"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/.build/release}"
 APP_DIR="$OUT_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"

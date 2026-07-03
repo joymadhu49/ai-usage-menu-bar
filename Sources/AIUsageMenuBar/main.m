@@ -58,6 +58,11 @@ static NSString * const ClaudeLastGoodFetchedAtKey = @"claudeLastGoodFetchedAt";
 static NSTimeInterval const UsageBackoffMaxSeconds = 600.0;
 
 // Claude Code OAuth configuration (matches the Claude Code CLI production config).
+// Credentials are resolved file-first (~/.claude/.credentials.json, kept fresh by
+// the CLI) so the app never has to touch the CLI's keychain item in normal use.
+// The keychain is a one-time last resort: reading another app's item triggers a
+// password prompt, and because this app is ad-hoc signed, "Always Allow" cannot
+// stick across rebuilds — so we avoid the keychain rather than fight it.
 static NSString * const KeychainService = @"Claude Code-credentials";
 static NSString * const OAuthClientID = @"9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 static NSString * const OAuthTokenURL = @"https://platform.claude.com/v1/oauth/token";
@@ -66,7 +71,10 @@ static NSString * const OAuthBetaHeader = @"oauth-2025-04-20";
 
 #pragma mark - Custom menu row views
 
-static CGFloat const AIMRowWidth = 332.0;
+static CGFloat const AIMRowWidth = 306.0;
+static CGFloat const AIMRowLeftInset = 14.0;
+static CGFloat const AIMRowRightInset = 14.0;
+static CGFloat const AIMTrackLeft = 58.0;
 
 // Tints a template image into `rect` with `color` (menu views don't auto-tint).
 static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
@@ -91,24 +99,24 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     CGFloat midY = NSMidY(b);
 
     if (self.icon != nil) {
-        AIMDrawTemplateImage(self.icon, NSMakeRect(14.0, midY - 8.0, 16.0, 16.0), NSColor.labelColor);
+        AIMDrawTemplateImage(self.icon, NSMakeRect(AIMRowLeftInset, midY - 7.0, 14.0, 14.0), NSColor.labelColor);
     }
 
     NSDictionary *titleAttrs = @{
-        NSFontAttributeName: [NSFont systemFontOfSize:13.0 weight:NSFontWeightSemibold],
+        NSFontAttributeName: [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold],
         NSForegroundColorAttributeName: NSColor.labelColor
     };
     NSSize ts = [self.title sizeWithAttributes:titleAttrs];
-    [self.title drawAtPoint:NSMakePoint(38.0, midY - ts.height / 2.0) withAttributes:titleAttrs];
+    [self.title drawAtPoint:NSMakePoint(AIMRowLeftInset + 20.0, midY - ts.height / 2.0) withAttributes:titleAttrs];
 
     if (self.trailing.length > 0) {
         NSDictionary *pillAttrs = @{
-            NSFontAttributeName: [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold],
+            NSFontAttributeName: [NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold],
             NSForegroundColorAttributeName: NSColor.secondaryLabelColor
         };
         NSSize ps = [self.trailing sizeWithAttributes:pillAttrs];
-        CGFloat padX = 7.0, padY = 2.0;
-        NSRect pill = NSMakeRect(NSMaxX(b) - 16.0 - ps.width - padX * 2.0,
+        CGFloat padX = 6.0, padY = 1.5;
+        NSRect pill = NSMakeRect(NSMaxX(b) - AIMRowRightInset - ps.width - padX * 2.0,
                                  midY - ps.height / 2.0 - padY,
                                  ps.width + padX * 2.0, ps.height + padY * 2.0);
         NSBezierPath *bg = [NSBezierPath bezierPathWithRoundedRect:pill xRadius:pill.size.height / 2.0 yRadius:pill.size.height / 2.0];
@@ -140,27 +148,36 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     CGFloat midY = NSMidY(b);
 
     NSDictionary *labelAttrs = @{
-        NSFontAttributeName: [NSFont systemFontOfSize:11.0 weight:NSFontWeightMedium],
+        NSFontAttributeName: [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium],
         NSForegroundColorAttributeName: NSColor.secondaryLabelColor
     };
     NSSize ls = [self.label sizeWithAttributes:labelAttrs];
-    [self.label drawAtPoint:NSMakePoint(20.0, midY - ls.height / 2.0) withAttributes:labelAttrs];
+    [self.label drawAtPoint:NSMakePoint(AIMRowLeftInset, midY - ls.height / 2.0) withAttributes:labelAttrs];
 
+    // Two-tone value: the percent reads first, the reset time stays quiet
+    // ("97% left" bold label color, " · 11:20 PM" small tertiary).
     NSString *value = self.valueText ?: @"";
-    NSDictionary *valueAttrs = @{
+    NSMutableAttributedString *att = [[NSMutableAttributedString alloc] initWithString:value attributes:@{
         NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:11.0 weight:NSFontWeightSemibold],
         NSForegroundColorAttributeName: NSColor.labelColor
-    };
-    NSSize vs = [value sizeWithAttributes:valueAttrs];
-    CGFloat valueRight = NSMaxX(b) - 16.0;
-    [value drawAtPoint:NSMakePoint(valueRight - vs.width, midY - vs.height / 2.0) withAttributes:valueAttrs];
+    }];
+    NSRange sep = [value rangeOfString:@" · "];
+    if (sep.location != NSNotFound) {
+        [att setAttributes:@{
+            NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:10.0 weight:NSFontWeightRegular],
+            NSForegroundColorAttributeName: NSColor.tertiaryLabelColor
+        } range:NSMakeRange(sep.location, value.length - sep.location)];
+    }
+    NSSize vs = att.size;
+    CGFloat valueRight = NSMaxX(b) - AIMRowRightInset;
+    [att drawAtPoint:NSMakePoint(valueRight - vs.width, midY - vs.height / 2.0)];
 
-    CGFloat trackLeft = 64.0;
-    CGFloat trackRight = valueRight - vs.width - 12.0;
+    CGFloat trackLeft = AIMTrackLeft;
+    CGFloat trackRight = valueRight - vs.width - 10.0;
     if (trackRight < trackLeft + 24.0) { trackRight = trackLeft + 24.0; }
-    NSRect track = NSMakeRect(trackLeft, midY - 2.5, trackRight - trackLeft, 5.0);
-    NSBezierPath *trackPath = [NSBezierPath bezierPathWithRoundedRect:track xRadius:2.5 yRadius:2.5];
-    [[NSColor.tertiaryLabelColor colorWithAlphaComponent:0.28] set];
+    NSRect track = NSMakeRect(trackLeft, midY - 2.0, trackRight - trackLeft, 4.0);
+    NSBezierPath *trackPath = [NSBezierPath bezierPathWithRoundedRect:track xRadius:2.0 yRadius:2.0];
+    [[NSColor.tertiaryLabelColor colorWithAlphaComponent:0.22] set];
     [trackPath fill];
 
     if (!isnan(self.usedPercent)) {
@@ -169,7 +186,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         if (fraction > 0.0 && width < 3.0) { width = 3.0; }
         if (width > 0.0) {
             NSRect fill = NSMakeRect(track.origin.x, track.origin.y, width, track.size.height);
-            NSBezierPath *fillPath = [NSBezierPath bezierPathWithRoundedRect:fill xRadius:2.5 yRadius:2.5];
+            NSBezierPath *fillPath = [NSBezierPath bezierPathWithRoundedRect:fill xRadius:2.0 yRadius:2.0];
             [[self severityColor:self.usedPercent] set];
             [fillPath fill];
         }
@@ -191,14 +208,14 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     CGFloat midY = NSMidY(b);
 
     NSDictionary *labelAttrs = @{
-        NSFontAttributeName: [NSFont systemFontOfSize:11.0 weight:NSFontWeightMedium],
+        NSFontAttributeName: [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium],
         NSForegroundColorAttributeName: NSColor.secondaryLabelColor
     };
     NSSize ls = [self.label sizeWithAttributes:labelAttrs];
-    [self.label drawAtPoint:NSMakePoint(20.0, midY - ls.height / 2.0) withAttributes:labelAttrs];
+    [self.label drawAtPoint:NSMakePoint(AIMRowLeftInset, midY - ls.height / 2.0) withAttributes:labelAttrs];
 
-    NSRect plot = NSMakeRect(64.0, 4.0, NSMaxX(b) - 16.0 - 64.0, b.size.height - 8.0);
-    [[NSColor.tertiaryLabelColor colorWithAlphaComponent:0.16] set];
+    NSRect plot = NSMakeRect(AIMTrackLeft, 3.0, NSMaxX(b) - AIMRowRightInset - AIMTrackLeft, b.size.height - 6.0);
+    [[NSColor.tertiaryLabelColor colorWithAlphaComponent:0.10] set];
     [[NSBezierPath bezierPathWithRoundedRect:plot xRadius:3.0 yRadius:3.0] fill];
 
     if (self.points.count < 2) {
@@ -208,7 +225,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     NSTimeInterval now = [NSDate date].timeIntervalSince1970;
     NSTimeInterval start = now - HistoryWindowSeconds;
     NSBezierPath *line = [NSBezierPath bezierPath];
-    line.lineWidth = 1.5;
+    line.lineWidth = 1.25;
     line.lineJoinStyle = NSLineJoinStyleRound;
     BOOL started = NO;
     CGFloat lastY = 0.0;
@@ -229,7 +246,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         lastY = py;
     }
     if (started) {
-        [[NSColor.secondaryLabelColor colorWithAlphaComponent:0.9] set];
+        [[NSColor.secondaryLabelColor colorWithAlphaComponent:0.75] set];
         [line stroke];
     }
 }
@@ -254,6 +271,8 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 @property(nonatomic, strong) NSDate *claudeLastGoodFetchedAt;
 @property(nonatomic, strong) NSDate *usageBackoffUntil;
 @property(nonatomic, assign) NSTimeInterval usageBackoffSeconds;
+@property(nonatomic, strong) NSDictionary *claudeCredsCache;
+@property(nonatomic, strong) NSDate *keychainDenyUntil;
 @end
 
 @implementation AppDelegate
@@ -655,9 +674,6 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 - (NSMenu *)menuForCurrentState {
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"AI Usage"];
 
-    [self addHeader:@"AI Usage" toMenu:menu];
-    [menu addItem:[NSMenuItem separatorItem]];
-
     [self addClaudeSectionToMenu:menu];
     [menu addItem:[NSMenuItem separatorItem]];
     [self addCodexSectionToMenu:menu];
@@ -696,18 +712,29 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
                           used:[self usedPercentForState:state secondary:YES]
                          value:[self usageValueForState:state secondary:YES claude:YES]
                        toMenu:menu];
+    NSArray *scopedLimits = [state[@"scoped_limits"] isKindOfClass:[NSArray class]] ? state[@"scoped_limits"] : @[];
+    for (id entry in scopedLimits) {
+        if (![entry isKindOfClass:[NSDictionary class]]) { continue; }
+        NSDictionary *row = entry;
+        NSString *label = [row[@"label"] isKindOfClass:[NSString class]] ? row[@"label"] : nil;
+        id used = row[@"used_percent"];
+        if (label.length == 0 || ![used respondsToSelector:@selector(doubleValue)]) { continue; }
+        [self addUsageRowWithLabel:label
+                              used:[used doubleValue]
+                             value:[self scopedUsageValueForRow:row]
+                            toMenu:menu];
+    }
     [self addSparkRowForField:@"c" toMenu:menu];
-    if ([state[@"weekly_opus_summary"] isKindOfClass:[NSString class]]) {
-        [self addFooterText:state[@"weekly_opus_summary"] toMenu:menu];
+    if (scopedLimits.count == 0) {
+        // Legacy per-model footers; superseded by the scoped bar rows above.
+        if ([state[@"weekly_opus_summary"] isKindOfClass:[NSString class]]) {
+            [self addFooterText:state[@"weekly_opus_summary"] toMenu:menu];
+        }
+        if ([state[@"weekly_sonnet_summary"] isKindOfClass:[NSString class]]) {
+            [self addFooterText:state[@"weekly_sonnet_summary"] toMenu:menu];
+        }
     }
-    if ([state[@"weekly_sonnet_summary"] isKindOfClass:[NSString class]]) {
-        [self addFooterText:state[@"weekly_sonnet_summary"] toMenu:menu];
-    }
-    if ([state[@"extra_summary"] isKindOfClass:[NSString class]]) {
-        [self addFooterText:state[@"extra_summary"] toMenu:menu];
-    }
-
-    [self addFooterText:[self joinSummaries:@[state[@"updated_summary"]]] toMenu:menu];
+    [self addFooterText:[self joinSummaries:@[state[@"extra_summary"], state[@"updated_summary"]]] toMenu:menu];
     if (![self stateOK:state] && [state[@"error"] isKindOfClass:[NSString class]]) {
         [self addFooterText:[NSString stringWithFormat:@"⚠ %@", state[@"error"]] toMenu:menu];
     }
@@ -746,7 +773,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 #pragma mark - Styled info rows
 
 - (void)addHeaderRowWithIcon:(NSImage *)icon title:(NSString *)title trailing:(NSString *)trailing toMenu:(NSMenu *)menu {
-    AIMHeaderRow *view = [[AIMHeaderRow alloc] initWithFrame:NSMakeRect(0.0, 0.0, AIMRowWidth, 26.0)];
+    AIMHeaderRow *view = [[AIMHeaderRow alloc] initWithFrame:NSMakeRect(0.0, 0.0, AIMRowWidth, 24.0)];
     view.autoresizingMask = NSViewWidthSizable;
     view.icon = icon;
     view.title = title;
@@ -757,7 +784,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 }
 
 - (void)addUsageRowWithLabel:(NSString *)label used:(double)used value:(NSString *)value toMenu:(NSMenu *)menu {
-    AIMUsageRow *view = [[AIMUsageRow alloc] initWithFrame:NSMakeRect(0.0, 0.0, AIMRowWidth, 24.0)];
+    AIMUsageRow *view = [[AIMUsageRow alloc] initWithFrame:NSMakeRect(0.0, 0.0, AIMRowWidth, 21.0)];
     view.autoresizingMask = NSViewWidthSizable;
     view.label = label;
     view.usedPercent = used;
@@ -773,7 +800,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     if (points.count < 3) {
         return;
     }
-    AIMSparkRow *view = [[AIMSparkRow alloc] initWithFrame:NSMakeRect(0.0, 0.0, AIMRowWidth, 22.0)];
+    AIMSparkRow *view = [[AIMSparkRow alloc] initWithFrame:NSMakeRect(0.0, 0.0, AIMRowWidth, 20.0)];
     view.autoresizingMask = NSViewWidthSizable;
     view.label = @"24h";
     view.points = points;
@@ -787,10 +814,10 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     NSMenuItem *item = [[NSMenuItem alloc] init];
     item.enabled = NO;
     NSMutableParagraphStyle *p = [[NSMutableParagraphStyle alloc] init];
-    p.firstLineHeadIndent = 20.0;
-    p.headIndent = 20.0;
+    p.firstLineHeadIndent = AIMRowLeftInset;
+    p.headIndent = AIMRowLeftInset;
     item.attributedTitle = [[NSAttributedString alloc] initWithString:text attributes:@{
-        NSFontAttributeName: [NSFont systemFontOfSize:10.5 weight:NSFontWeightRegular],
+        NSFontAttributeName: [NSFont systemFontOfSize:10.0 weight:NSFontWeightRegular],
         NSForegroundColorAttributeName: NSColor.tertiaryLabelColor,
         NSParagraphStyleAttributeName: p
     }];
@@ -807,6 +834,17 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     if (clock.length == 0) {
         NSString *missing = claude ? [self claudeMissingResetReasonForState:state secondary:secondary] : @"—";
         return [NSString stringWithFormat:@"%@ · %@", metric, missing];
+    }
+    return [NSString stringWithFormat:@"%@ · %@", metric, clock];
+}
+
+// Value text for a scoped per-model row, matching usageValueForState's format.
+- (NSString *)scopedUsageValueForRow:(NSDictionary *)row {
+    NSString *metric = [self shortMetricTextForUsed:[row[@"used_percent"] doubleValue]];
+    NSNumber *reset = [row[@"resets_at"] respondsToSelector:@selector(doubleValue)] ? row[@"resets_at"] : nil;
+    NSString *clock = [self clockTextForSeconds:reset];
+    if (clock.length == 0) {
+        return metric;
     }
     return [NSString stringWithFormat:@"%@ · %@", metric, clock];
 }
@@ -847,7 +885,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
             [parts addObject:s];
         }
     }
-    return [parts componentsJoinedByString:@"  ·  "];
+    return [parts componentsJoinedByString:@" · "];
 }
 
 - (void)addSettingsToMenu:(NSMenu *)menu {
@@ -1307,7 +1345,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     }
 
     NSString *credsError = nil;
-    NSDictionary *creds = [self readKeychainCredentials:&credsError];
+    NSDictionary *creds = [self currentClaudeCredentials:&credsError];
     if (creds == nil) {
         return [self claudeStateForFailure:credsError ?: @"Claude Code credentials not found"];
     }
@@ -1474,6 +1512,9 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         if (sonnet.length > 0) { state[@"weekly_sonnet_summary"] = sonnet; }
     }
 
+    NSArray *scoped = [self scopedWeeklyLimitsFromResponse:response];
+    if (scoped.count > 0) { state[@"scoped_limits"] = scoped; }
+
     NSString *extra = [self extraUsageSummaryFromResponse:response];
     if (extra.length > 0) {
         state[@"extra_summary"] = extra;
@@ -1483,6 +1524,32 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         state[@"plan_summary"] = [NSString stringWithFormat:@"Plan: %@", [plan capitalizedString]];
     }
     return state;
+}
+
+// Per-model weekly limits from the newer `limits` array — e.g. the "Fable"
+// weekly cap shown on claude.ai. The legacy seven_day_opus/seven_day_sonnet
+// windows are null on accounts that have these, so this is their replacement:
+// entries with kind "weekly_scoped" and a scope.model.display_name.
+- (NSArray<NSDictionary *> *)scopedWeeklyLimitsFromResponse:(NSDictionary *)response {
+    NSArray *limits = [response[@"limits"] isKindOfClass:[NSArray class]] ? response[@"limits"] : @[];
+    NSMutableArray<NSDictionary *> *rows = [NSMutableArray array];
+    for (id entry in limits) {
+        if (![entry isKindOfClass:[NSDictionary class]]) { continue; }
+        NSDictionary *limit = entry;
+        if (![limit[@"kind"] isKindOfClass:[NSString class]] || ![limit[@"kind"] isEqualToString:@"weekly_scoped"]) { continue; }
+        NSDictionary *scope = [limit[@"scope"] isKindOfClass:[NSDictionary class]] ? limit[@"scope"] : nil;
+        NSDictionary *model = [scope[@"model"] isKindOfClass:[NSDictionary class]] ? scope[@"model"] : nil;
+        NSString *name = [self stringFromDictionary:model keys:@[@"display_name"]];
+        NSNumber *percent = [self numberFromDictionary:limit keys:@[@"percent"]];
+        if (name.length == 0 || percent == nil) { continue; }
+        NSMutableDictionary *row = [NSMutableDictionary dictionary];
+        row[@"label"] = name;
+        row[@"used_percent"] = @(MAX(0.0, MIN(100.0, percent.doubleValue)));
+        NSNumber *reset = [self resetEpochFromWindow:limit];
+        if (reset != nil) { row[@"resets_at"] = reset; }
+        [rows addObject:row];
+    }
+    return rows;
 }
 
 // Pay-as-you-go extra usage: "Extra usage: $387.46 of $2,000 (19%)".
@@ -1506,7 +1573,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     double used = usedCredits.doubleValue / divisor;
     double limit = monthlyLimit.doubleValue / divisor;
     double percent = MAX(0.0, MIN(100.0, used / limit * 100.0));
-    return [NSString stringWithFormat:@"Extra usage: $%.2f of $%.0f (%.0f%%)", used, limit, percent];
+    return [NSString stringWithFormat:@"Extra: $%.2f of $%.0f (%.0f%%)", used, limit, percent];
 }
 
 - (NSNumber *)utilizationPercentFromWindow:(NSDictionary *)window {
@@ -1555,9 +1622,92 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     return [NSString stringWithFormat:@"%@: %@, resets %@", label, usedText, [self resetLabelForSeconds:reset includeDate:includeDate]];
 }
 
-#pragma mark - Claude keychain + OAuth
+#pragma mark - Claude credentials + OAuth
+
+// Resolves credentials without prompting: freshest of the in-memory cache, the
+// CLI's ~/.claude/.credentials.json, and our own cache file. The keychain is
+// only consulted when none of those exist, and a granted read is persisted to
+// our cache file so the prompt can never recur on later launches.
+- (NSDictionary *)currentClaudeCredentials:(NSString **)error {
+    NSMutableArray<NSDictionary *> *candidates = [NSMutableArray array];
+    if (self.claudeCredsCache != nil) { [candidates addObject:self.claudeCredsCache]; }
+    NSDictionary *cliFile = [self readCredentialsFileAtPath:[self claudeCLICredentialsPath]];
+    if (cliFile != nil) { [candidates addObject:cliFile]; }
+    NSDictionary *cached = [self readCredentialsFileAtPath:[self appCredentialsCachePath]];
+    if (cached != nil) { [candidates addObject:cached]; }
+
+    NSDictionary *best = nil;
+    double bestExpiry = -1.0;
+    for (NSDictionary *candidate in candidates) {
+        double expiry = [self numberFromDictionary:candidate keys:@[@"expiresAt"]].doubleValue;
+        if (best == nil || expiry > bestExpiry) {
+            best = candidate;
+            bestExpiry = expiry;
+        }
+    }
+    if (best != nil) {
+        self.claudeCredsCache = best;
+        return best;
+    }
+
+    NSDictionary *keychain = [self readKeychainCredentials:error];
+    if (keychain != nil) {
+        [self persistCredentials:keychain];
+    }
+    return keychain;
+}
+
+- (NSString *)claudeCLICredentialsPath {
+    return [NSHomeDirectory() stringByAppendingPathComponent:@".claude/.credentials.json"];
+}
+
+- (NSString *)appCredentialsCachePath {
+    NSString *appSupport = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
+    return [[appSupport stringByAppendingPathComponent:@"AI Usage Menu Bar"]
+            stringByAppendingPathComponent:@"claude-oauth.json"];
+}
+
+- (NSDictionary *)readCredentialsFileAtPath:(NSString *)path {
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (data == nil) { return nil; }
+    return [self oauthDictionaryFromJSONData:data];
+}
+
+- (NSDictionary *)oauthDictionaryFromJSONData:(NSData *)data {
+    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSDictionary *root = [json isKindOfClass:[NSDictionary class]] ? json : nil;
+    NSDictionary *oauth = [root[@"claudeAiOauth"] isKindOfClass:[NSDictionary class]] ? root[@"claudeAiOauth"] : root;
+    if (![oauth isKindOfClass:[NSDictionary class]]) { return nil; }
+    if ([self stringFromDictionary:oauth keys:@[@"accessToken"]].length == 0 &&
+        [self stringFromDictionary:oauth keys:@[@"refreshToken"]].length == 0) {
+        return nil;
+    }
+    return oauth;
+}
+
+// Stores credentials in memory and mirrors them to our own 0600 cache file so
+// later launches never need the keychain. Never writes to the CLI's file or
+// keychain item — the CLI owns those, and updating another app's keychain item
+// both prompts and risks clobbering tokens the CLI refreshed in the meantime.
+- (void)persistCredentials:(NSDictionary *)oauth {
+    self.claudeCredsCache = oauth;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"claudeAiOauth": oauth} options:0 error:nil];
+    if (data == nil) { return; }
+    NSString *path = [self appCredentialsCachePath];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    [fm createDirectoryAtPath:path.stringByDeletingLastPathComponent
+  withIntermediateDirectories:YES
+                   attributes:@{ NSFilePosixPermissions: @0700 }
+                        error:nil];
+    [data writeToFile:path options:NSDataWritingAtomic error:nil];
+    [fm setAttributes:@{ NSFilePosixPermissions: @0600 } ofItemAtPath:path error:nil];
+}
 
 - (NSDictionary *)readKeychainCredentials:(NSString **)error {
+    if (self.keychainDenyUntil != nil && [self.keychainDenyUntil timeIntervalSinceNow] > 0) {
+        if (error) { *error = @"Keychain access denied (will retry later)"; }
+        return nil;
+    }
     NSDictionary *query = @{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService: KeychainService,
@@ -1576,13 +1726,15 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
                 *error = [NSString stringWithFormat:@"Keychain error %d", (int)status];
             }
         }
+        if (status == errSecUserCanceled || status == errSecAuthFailed) {
+            // Denied prompts must not recur every poll tick.
+            self.keychainDenyUntil = [NSDate dateWithTimeIntervalSinceNow:6.0 * 3600.0];
+        }
         return nil;
     }
     NSData *data = (__bridge_transfer NSData *)result;
-    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-    NSDictionary *root = [json isKindOfClass:[NSDictionary class]] ? json : nil;
-    NSDictionary *oauth = [root[@"claudeAiOauth"] isKindOfClass:[NSDictionary class]] ? root[@"claudeAiOauth"] : root;
-    if (![oauth isKindOfClass:[NSDictionary class]]) {
+    NSDictionary *oauth = [self oauthDictionaryFromJSONData:data];
+    if (oauth == nil) {
         if (error) { *error = @"Keychain credentials were not valid JSON"; }
         return nil;
     }
@@ -1665,26 +1817,12 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     double expiresAtMs = expiresIn != nil
         ? ([NSDate date].timeIntervalSince1970 + expiresIn.doubleValue) * 1000.0
         : ([NSDate date].timeIntervalSince1970 + 3600.0) * 1000.0;
-    [self writeBackRefreshedCredentials:creds accessToken:newAccess refreshToken:newRefresh expiresAtMs:expiresAtMs];
-    return newAccess;
-}
-
-- (void)writeBackRefreshedCredentials:(NSDictionary *)creds
-                          accessToken:(NSString *)accessToken
-                         refreshToken:(NSString *)refreshToken
-                          expiresAtMs:(double)expiresAtMs {
     NSMutableDictionary *oauth = [creds mutableCopy];
-    oauth[@"accessToken"] = accessToken;
-    oauth[@"refreshToken"] = refreshToken;
+    oauth[@"accessToken"] = newAccess;
+    oauth[@"refreshToken"] = newRefresh;
     oauth[@"expiresAt"] = @((long long)llround(expiresAtMs));
-
-    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"claudeAiOauth": oauth} options:0 error:nil];
-    if (data == nil) { return; }
-    NSDictionary *query = @{
-        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: KeychainService
-    };
-    SecItemUpdate((__bridge CFDictionaryRef)query, (__bridge CFDictionaryRef)@{ (__bridge id)kSecValueData: data });
+    [self persistCredentials:oauth];
+    return newAccess;
 }
 
 #pragma mark - HTTP helpers (synchronous, run on a background queue)
@@ -2250,7 +2388,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     if (date == nil) { return @"Updated: unknown"; }
     NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
     formatter.dateStyle = NSDateFormatterNoStyle;
-    formatter.timeStyle = NSDateFormatterMediumStyle;
+    formatter.timeStyle = NSDateFormatterShortStyle;
     return [NSString stringWithFormat:@"Updated: %@", [formatter stringFromDate:date]];
 }
 
