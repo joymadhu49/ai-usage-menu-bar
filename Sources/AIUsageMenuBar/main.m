@@ -303,11 +303,14 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
     self.statusItem.button.image = [self barImage];
     self.statusItem.button.imagePosition = NSImageOnly;
-    // Drive the menu from an explicit action so BOTH left- and right-click open
-    // it (and the menu is always rebuilt fresh against the latest state).
-    self.statusItem.button.target = self;
-    self.statusItem.button.action = @selector(statusItemClicked:);
-    [self.statusItem.button sendActionOn:NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp];
+    // A permanently attached menu opens natively on BOTH left- and right-click,
+    // on mouse-down, with AppKit doing all the tracking. Its items are rebuilt
+    // in place via menuNeedsUpdate: just before each open. Never swap
+    // statusItem.menu around a click (attach-performClick-detach): detaching
+    // can land while the menu is still opening and the click shows nothing.
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"AI Usage"];
+    menu.delegate = self;
+    self.statusItem.menu = menu;
 
     [self refresh];
     [self schedulePollTimer];
@@ -661,19 +664,15 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 
 #pragma mark - Menu
 
-// Show the menu on either mouse button. We temporarily attach the freshly
-// built menu, trigger the button's click (which opens it modally), then detach
-// it so the next click fires this action again rather than auto-opening.
-- (void)statusItemClicked:(id)sender {
-    (void)sender;
-    self.statusItem.menu = [self menuForCurrentState];
-    [self.statusItem.button performClick:nil];
-    self.statusItem.menu = nil;
+// NSMenuDelegate: AppKit calls this right before the attached menu is shown.
+// Rebuild the items of the SAME menu instance so the content is always fresh;
+// reassigning statusItem.menu here would cancel the in-flight open.
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    [menu removeAllItems];
+    [self buildMenuItems:menu];
 }
 
-- (NSMenu *)menuForCurrentState {
-    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"AI Usage"];
-
+- (void)buildMenuItems:(NSMenu *)menu {
     [self addClaudeSectionToMenu:menu];
     [menu addItem:[NSMenuItem separatorItem]];
     [self addCodexSectionToMenu:menu];
@@ -692,7 +691,6 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     [menu addItem:settingsItem];
 
     [self addActionsToMenu:menu];
-    return menu;
 }
 
 - (void)addClaudeSectionToMenu:(NSMenu *)menu {
