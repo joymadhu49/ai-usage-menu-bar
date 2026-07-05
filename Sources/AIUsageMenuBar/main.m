@@ -673,9 +673,17 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 }
 
 - (void)buildMenuItems:(NSMenu *)menu {
-    [self addClaudeSectionToMenu:menu];
-    [menu addItem:[NSMenuItem separatorItem]];
-    [self addCodexSectionToMenu:menu];
+    // The provider sections render live API data. If one ever throws, show the
+    // error but never lose the control items below — Settings and Quit must
+    // stay reachable no matter what the data looks like.
+    @try {
+        [self addClaudeSectionToMenu:menu];
+        [menu addItem:[NSMenuItem separatorItem]];
+        [self addCodexSectionToMenu:menu];
+    } @catch (NSException *exception) {
+        [self addFooterText:[NSString stringWithFormat:@"⚠ Menu error: %@", exception.reason ?: exception.name]
+                     toMenu:menu];
+    }
 
     if (self.launchAtLoginError.length > 0) {
         [menu addItem:[NSMenuItem separatorItem]];
@@ -732,7 +740,8 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
             [self addFooterText:state[@"weekly_sonnet_summary"] toMenu:menu];
         }
     }
-    [self addFooterText:[self joinSummaries:@[state[@"extra_summary"], state[@"updated_summary"]]] toMenu:menu];
+    // ?: @"" — a nil element in an @[] literal throws and aborts the menu build.
+    [self addFooterText:[self joinSummaries:@[state[@"extra_summary"] ?: @"", state[@"updated_summary"] ?: @""]] toMenu:menu];
     if (![self stateOK:state] && [state[@"error"] isKindOfClass:[NSString class]]) {
         [self addFooterText:[NSString stringWithFormat:@"⚠ %@", state[@"error"]] toMenu:menu];
     }
@@ -761,7 +770,9 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         [self addFooterText:state[@"monthly_summary"] toMenu:menu];
     }
 
-    NSString *footer = [self joinSummaries:@[state[@"credits_summary"], state[@"reset_credits_summary"], state[@"updated_summary"]]];
+    NSString *footer = [self joinSummaries:@[state[@"credits_summary"] ?: @"",
+                                             state[@"reset_credits_summary"] ?: @"",
+                                             state[@"updated_summary"] ?: @""]];
     [self addFooterText:footer toMenu:menu];
     if (![self stateOK:state] && [state[@"error"] isKindOfClass:[NSString class]]) {
         [self addFooterText:[NSString stringWithFormat:@"⚠ %@", state[@"error"]] toMenu:menu];
