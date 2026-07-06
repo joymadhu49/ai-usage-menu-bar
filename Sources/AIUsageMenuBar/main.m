@@ -1314,7 +1314,9 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         @"v": @1,
         @"generated_at": @([NSDate date].timeIntervalSince1970),
         @"claude": claude ?: @{},
-        @"codex": codex ?: @{}
+        @"codex": codex ?: @{},
+        // 24h sample history {t, c, x} so the phone can draw usage charts.
+        @"history": [NSUserDefaults.standardUserDefaults arrayForKey:HistoryKey] ?: @[]
     };
     NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil] ?: [NSData data];
     NSString *header = [NSString stringWithFormat:

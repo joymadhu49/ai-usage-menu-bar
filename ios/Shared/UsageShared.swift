@@ -58,12 +58,28 @@ struct ProviderSnapshot {
     let extra: String?
 }
 
+// One point of the Mac's rolling 24h sample history.
+struct HistoryPoint {
+    let date: Date
+    let claudeUsed: Double?
+    let codexUsed: Double?
+}
+
 // Parses the JSON served by the Mac menu-bar app's LAN sync server. The
 // provider dictionaries are the app's internal state dictionaries verbatim.
 struct UsageSnapshot {
     let generatedAt: Date
     let claude: ProviderSnapshot?
     let codex: ProviderSnapshot?
+    let history: [HistoryPoint]
+
+    // (date, used%) series for one provider, oldest first.
+    func historySeries(claude wantClaude: Bool) -> [(Date, Double)] {
+        history.compactMap { point in
+            guard let value = wantClaude ? point.claudeUsed : point.codexUsed else { return nil }
+            return (point.date, value)
+        }
+    }
 
     static func parse(_ data: Data) -> UsageSnapshot? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -77,7 +93,20 @@ struct UsageSnapshot {
         if claude == nil && codex == nil {
             return nil
         }
-        return UsageSnapshot(generatedAt: generated, claude: claude, codex: codex)
+
+        var history: [HistoryPoint] = []
+        if let entries = root["history"] as? [[String: Any]] {
+            for entry in entries {
+                guard let t = (entry["t"] as? NSNumber)?.doubleValue else { continue }
+                let c = (entry["c"] as? NSNumber)?.doubleValue
+                let x = (entry["x"] as? NSNumber)?.doubleValue
+                history.append(HistoryPoint(date: Date(timeIntervalSince1970: t),
+                                            claudeUsed: (c ?? -1) >= 0 ? c : nil,
+                                            codexUsed: (x ?? -1) >= 0 ? x : nil))
+            }
+            history.sort { $0.date < $1.date }
+        }
+        return UsageSnapshot(generatedAt: generated, claude: claude, codex: codex, history: history)
     }
 
     private static func provider(from state: [String: Any]?,

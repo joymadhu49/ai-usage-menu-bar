@@ -196,50 +196,78 @@ private struct SmallView: View {
     }
 }
 
+private struct ProviderHeader: View {
+    let icon: String
+    let tint: Color
+    let name: String
+    let plan: String?
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(tint)
+            Text(name)
+                .font(.caption.weight(.semibold))
+            Spacer()
+            if let plan {
+                Text(plan.uppercased())
+                    .font(.system(size: 8, weight: .semibold))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.secondary.opacity(0.18)))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct UsageSlotRow: View {
+    let row: UsageRow
+    let showReset: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(row.label)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                if showReset, let reset = resetText(row.resetsAt) {
+                    Text("resets \(reset)")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer()
+                Text("\(Int(row.leftPercent.rounded()))% left")
+                    .font(.caption.weight(.semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(severityColor(row.severity))
+            }
+            BarView(row: row)
+        }
+    }
+}
+
+// A column with a fixed number of row slots so side-by-side providers stay
+// vertically aligned even when one has fewer windows.
 private struct ProviderColumn: View {
     let icon: String
     let tint: Color
     let name: String
     let plan: String?
     let rows: [UsageRow]
+    let slots: Int
     let showResets: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 5) {
-                Image(systemName: icon)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(tint)
-                Text(name)
-                    .font(.caption.weight(.semibold))
-                Spacer()
-                if let plan {
-                    Text(plan.uppercased())
-                        .font(.system(size: 8, weight: .semibold))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.secondary.opacity(0.18)))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            ForEach(rows) { row in
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack {
-                        Text(row.label)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        if showResets, let reset = resetText(row.resetsAt) {
-                            Text(reset)
-                                .font(.system(size: 9))
-                                .foregroundStyle(.tertiary)
-                        }
-                        Text("\(Int(row.leftPercent.rounded()))%")
-                            .font(.caption2.weight(.semibold))
-                            .monospacedDigit()
-                            .foregroundStyle(severityColor(row.severity))
-                    }
-                    BarView(row: row)
+        VStack(alignment: .leading, spacing: 10) {
+            ProviderHeader(icon: icon, tint: tint, name: name, plan: plan)
+            ForEach(0..<slots, id: \.self) { index in
+                if index < rows.count {
+                    UsageSlotRow(row: rows[index], showReset: showResets)
+                        .frame(height: 30, alignment: .top)
+                } else {
+                    Color.clear.frame(height: 30)
                 }
             }
         }
@@ -272,12 +300,14 @@ private struct MediumView: View {
     let entry: UsageEntry
 
     var body: some View {
+        // Both columns share the same slot count so their rows line up.
+        let slots = min(2, max(snapshot.claude?.rows.count ?? 0, snapshot.codex?.rows.count ?? 0))
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 14) {
                 if let claude = snapshot.claude {
                     ProviderColumn(icon: ProviderStyle.claudeIcon, tint: ProviderStyle.claudeTint,
                                    name: "Claude", plan: claude.plan,
-                                   rows: Array(claude.rows.prefix(2)), showResets: false)
+                                   rows: Array(claude.rows.prefix(2)), slots: slots, showResets: false)
                 }
                 if snapshot.claude != nil && snapshot.codex != nil {
                     Divider()
@@ -285,7 +315,7 @@ private struct MediumView: View {
                 if let codex = snapshot.codex {
                     ProviderColumn(icon: ProviderStyle.codexIcon, tint: .secondary,
                                    name: "Codex", plan: codex.plan,
-                                   rows: Array(codex.rows.prefix(2)), showResets: false)
+                                   rows: Array(codex.rows.prefix(2)), slots: slots, showResets: false)
                 }
             }
             Spacer(minLength: 0)
@@ -295,32 +325,53 @@ private struct MediumView: View {
     }
 }
 
+// Large: full rows with reset times plus a 24h activity chart per provider.
 private struct LargeView: View {
     let snapshot: UsageSnapshot
     let entry: UsageEntry
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             if let claude = snapshot.claude {
-                ProviderColumn(icon: ProviderStyle.claudeIcon, tint: ProviderStyle.claudeTint,
-                               name: "Claude Code", plan: claude.plan,
-                               rows: claude.rows, showResets: true)
-                if let extra = claude.extra {
-                    Text(extra)
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                }
+                providerBlock(provider: claude, icon: ProviderStyle.claudeIcon,
+                              tint: ProviderStyle.claudeTint, name: "Claude Code",
+                              series: snapshot.historySeries(claude: true))
             }
             Divider()
             if let codex = snapshot.codex {
-                ProviderColumn(icon: ProviderStyle.codexIcon, tint: .secondary,
-                               name: "Codex", plan: codex.plan,
-                               rows: codex.rows, showResets: true)
+                providerBlock(provider: codex, icon: ProviderStyle.codexIcon,
+                              tint: .secondary, name: "Codex",
+                              series: snapshot.historySeries(claude: false))
             }
             Spacer(minLength: 0)
             UpdatedFooter(entry: entry)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private func providerBlock(provider: ProviderSnapshot, icon: String, tint: Color,
+                               name: String, series: [(Date, Double)]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ProviderHeader(icon: icon, tint: tint, name: name, plan: provider.plan)
+            ForEach(provider.rows) { row in
+                UsageSlotRow(row: row, showReset: true)
+            }
+            if series.count >= 3 {
+                HStack(alignment: .top, spacing: 6) {
+                    Text("24h")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                    HistoryChart(series: series, color: tint == .secondary ? .teal : tint)
+                        .frame(height: 30)
+                }
+            }
+            if let extra = provider.extra {
+                Text(extra)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+        }
     }
 }
 

@@ -9,10 +9,14 @@ struct ContentView: View {
             List {
                 if let snapshot = model.snapshot {
                     if let claude = snapshot.claude {
-                        ProviderSection(provider: claude, icon: "rays")
+                        ProviderSection(provider: claude, icon: "rays",
+                                        tint: Color(red: 0.87, green: 0.48, blue: 0.34),
+                                        series: snapshot.historySeries(claude: true))
                     }
                     if let codex = snapshot.codex {
-                        ProviderSection(provider: codex, icon: "chevron.left.forwardslash.chevron.right")
+                        ProviderSection(provider: codex, icon: "chevron.left.forwardslash.chevron.right",
+                                        tint: .teal,
+                                        series: snapshot.historySeries(claude: false))
                     }
                     statusFooter
                 } else {
@@ -99,11 +103,24 @@ struct ContentView: View {
 private struct ProviderSection: View {
     let provider: ProviderSnapshot
     let icon: String
+    let tint: Color
+    let series: [(Date, Double)]
 
     var body: some View {
         Section {
             ForEach(provider.rows) { row in
                 UsageRowView(row: row)
+            }
+            if series.count >= 3 {
+                HStack(alignment: .top, spacing: 10) {
+                    Text("24h")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 52, alignment: .leading)
+                    HistoryChart(series: series, color: tint)
+                        .frame(height: 44)
+                }
+                .padding(.vertical, 2)
             }
             if let extra = provider.extra {
                 Text(extra)
