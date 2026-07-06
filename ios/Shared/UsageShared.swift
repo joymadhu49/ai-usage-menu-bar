@@ -89,7 +89,7 @@ struct UsageSnapshot {
         let claude = provider(from: root["claude"] as? [String: Any],
                               name: "Claude Code", defaultPrimary: "5h", defaultSecondary: "7d", scoped: true)
         let codex = provider(from: root["codex"] as? [String: Any],
-                             name: "Codex", defaultPrimary: "5h", defaultSecondary: "7d", scoped: false)
+                             name: "Codex", defaultPrimary: "5h", defaultSecondary: "7d", scoped: true)
         if claude == nil && codex == nil {
             return nil
         }

@@ -9,8 +9,12 @@ struct UsageEntry: TimelineEntry {
 }
 
 struct UsageProvider: TimelineProvider {
+    // Placeholder renders during size changes and gallery previews — use the
+    // cached snapshot so every size shows real content immediately instead of
+    // an empty "connect to your Mac" frame.
     func placeholder(in context: Context) -> UsageEntry {
-        UsageEntry(date: .now, snapshot: nil, fetchedAt: nil, isLive: false)
+        let cached = AIUsageStore.cachedSnapshot()
+        return UsageEntry(date: .now, snapshot: cached?.snapshot, fetchedAt: cached?.fetchedAt, isLive: false)
     }
 
     func getSnapshot(in context: Context, completion: @escaping (UsageEntry) -> Void) {
@@ -126,11 +130,12 @@ private struct InlineView: View {
     }
 }
 
+// Lock screen rectangular: aligned grid — name column, capacity bar, bold %.
 private struct RectangularView: View {
     let snapshot: UsageSnapshot
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        Grid(alignment: .leading, horizontalSpacing: 7, verticalSpacing: 7) {
             if let row = snapshot.claude?.rows.first {
                 line(icon: ProviderStyle.claudeIcon, name: "Claude", row: row)
             }
@@ -138,20 +143,25 @@ private struct RectangularView: View {
                 line(icon: ProviderStyle.codexIcon, name: "Codex", row: row)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 
     private func line(icon: String, name: String, row: UsageRow) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        GridRow {
             HStack(spacing: 4) {
-                Image(systemName: icon).font(.caption2)
-                Text(name).font(.caption2.weight(.medium))
-                Spacer()
-                Text("\(Int(row.leftPercent.rounded()))%")
-                    .font(.caption.weight(.semibold))
-                    .monospacedDigit()
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .semibold))
+                Text(name)
+                    .font(.caption2.weight(.medium))
             }
-            BarView(row: row)
+            Gauge(value: row.leftPercent / 100) { EmptyView() }
+                .gaugeStyle(.accessoryLinearCapacity)
+                .frame(maxWidth: .infinity)
+            Text("\(Int(row.leftPercent.rounded()))%")
+                .font(.system(.caption, design: .rounded).weight(.bold))
+                .monospacedDigit()
+                .widgetAccentable()
+                .gridColumnAlignment(.trailing)
         }
     }
 }
@@ -232,16 +242,21 @@ private struct UsageSlotRow: View {
                 Text(row.label)
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 if showReset, let reset = resetText(row.resetsAt) {
                     Text("resets \(reset)")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
+                        .lineLimit(1)
                 }
-                Spacer()
+                Spacer(minLength: 4)
                 Text("\(Int(row.leftPercent.rounded()))% left")
                     .font(.caption.weight(.semibold))
                     .monospacedDigit()
                     .foregroundStyle(severityColor(row.severity))
+                    .lineLimit(1)
+                    .layoutPriority(1)
             }
             BarView(row: row)
         }

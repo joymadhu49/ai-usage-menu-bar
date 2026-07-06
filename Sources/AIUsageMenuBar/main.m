@@ -780,10 +780,27 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
                           used:[self usedPercentForState:state secondary:NO]
                          value:[self usageValueForState:state secondary:NO claude:NO]
                        toMenu:menu];
-    [self addUsageRowWithLabel:secondaryLabel
-                          used:[self usedPercentForState:state secondary:YES]
-                         value:[self usageValueForState:state secondary:YES claude:NO]
-                       toMenu:menu];
+    // Only render a secondary row when the provider actually reported one
+    // (free-tier Codex has just a 30d window; the secondary accessors fall
+    // back to primary, which would duplicate the first row here).
+    if ([state[@"secondary_used_percent"] respondsToSelector:@selector(doubleValue)]) {
+        [self addUsageRowWithLabel:secondaryLabel
+                              used:[self usedPercentForState:state secondary:YES]
+                             value:[self usageValueForState:state secondary:YES claude:NO]
+                           toMenu:menu];
+    }
+    NSArray *codexScoped = [state[@"scoped_limits"] isKindOfClass:[NSArray class]] ? state[@"scoped_limits"] : @[];
+    for (id entry in codexScoped) {
+        if (![entry isKindOfClass:[NSDictionary class]]) { continue; }
+        NSDictionary *row = entry;
+        NSString *label = [row[@"label"] isKindOfClass:[NSString class]] ? row[@"label"] : nil;
+        id used = row[@"used_percent"];
+        if (label.length == 0 || ![used respondsToSelector:@selector(doubleValue)]) { continue; }
+        [self addUsageRowWithLabel:label
+                              used:[used doubleValue]
+                             value:[self scopedUsageValueForRow:row]
+                            toMenu:menu];
+    }
     [self addSparkRowForField:@"x" toMenu:menu];
     if ([state[@"monthly_summary"] isKindOfClass:[NSString class]]) {
         [self addFooterText:state[@"monthly_summary"] toMenu:menu];
@@ -2288,7 +2305,41 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     if (resetCredits.length > 0) { state[@"reset_credits_summary"] = resetCredits; }
     NSArray *summaries = [self limitSummariesFromResult:result];
     if (summaries.count > 0) { state[@"limit_summaries"] = summaries; }
+    NSArray *scoped = [self codexScopedLimitsFromResult:result excludingSnapshot:snapshot];
+    if (scoped.count > 0) { state[@"scoped_limits"] = scoped; }
     return state;
+}
+
+// Structured rows for every additional limit the app-server reports beyond
+// the preferred one (e.g. per-model limits like GPT-5.3-Codex-Spark), in the
+// same {label, used_percent, resets_at} shape as Claude's scoped rows so the
+// menu and the iOS app render them as bars.
+- (NSArray<NSDictionary *> *)codexScopedLimitsFromResult:(NSDictionary *)result excludingSnapshot:(NSDictionary *)preferred {
+    NSDictionary *byLimitId = [result[@"rateLimitsByLimitId"] isKindOfClass:[NSDictionary class]] ? result[@"rateLimitsByLimitId"] : nil;
+    if (byLimitId.count == 0) {
+        return @[];
+    }
+    NSString *preferredId = [self stringFromDictionary:preferred keys:@[@"limitId"]];
+    NSMutableArray<NSDictionary *> *rows = [NSMutableArray array];
+    for (id key in [[byLimitId allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+        NSDictionary *snapshot = [byLimitId[key] isKindOfClass:[NSDictionary class]] ? byLimitId[key] : nil;
+        if (snapshot == nil) { continue; }
+        NSString *limitId = [self stringFromDictionary:snapshot keys:@[@"limitId"]] ?: [key description];
+        if (preferredId.length > 0 && [limitId isEqualToString:preferredId]) { continue; }
+        NSString *name = [self stringFromDictionary:snapshot keys:@[@"limitName", @"limitId"]] ?: [key description];
+        for (NSString *windowKey in @[@"primary", @"secondary"]) {
+            NSDictionary *window = [self windowForSnapshot:snapshot key:windowKey];
+            NSNumber *used = [self numberFromDictionary:window keys:@[@"usedPercent"]];
+            if (used == nil) { continue; }
+            NSMutableDictionary *row = [NSMutableDictionary dictionary];
+            row[@"label"] = [NSString stringWithFormat:@"%@ %@", name, [self windowLabelForWindow:window appServerKeys:YES]];
+            row[@"used_percent"] = used;
+            NSNumber *reset = [self numberFromDictionary:window keys:@[@"resetsAt"]];
+            if (reset != nil) { row[@"resets_at"] = reset; }
+            [rows addObject:row];
+        }
+    }
+    return rows;
 }
 
 - (NSDictionary *)buildCodexStateFromLegacySnapshot:(NSDictionary *)snapshot sourceText:(NSString *)sourceText timestamp:(NSDate *)timestamp {

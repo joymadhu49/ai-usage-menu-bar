@@ -159,7 +159,9 @@ private struct UsageRowView: View {
             Text(row.label)
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.secondary)
-                .frame(width: 52, alignment: .leading)
+                .lineLimit(1)
+                .frame(minWidth: 40, maxWidth: 120, alignment: .leading)
+                .fixedSize(horizontal: true, vertical: false)
 
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
