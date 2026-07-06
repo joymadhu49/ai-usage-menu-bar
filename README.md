@@ -40,6 +40,33 @@ macOS notifications fire once when a tracked window crosses **80%** used and
 again at **95%**, then re-arm after the window resets. Toggle under
 `Settings → Usage Alerts`.
 
+## iPhone companion app + home-screen widget
+
+The `ios/` folder contains **AI Usage for iPhone**: a SwiftUI app plus a
+WidgetKit **home-screen widget** (small and medium) showing the same % left
+bars, synchronized from your Mac over the local network.
+
+How it works: the Mac menu-bar app runs a tiny LAN sync server
+(`Settings → iPhone Sync (LAN)`, on by default) that serves the latest usage
+as JSON on port `8737` and announces itself via Bonjour (`_aiusage._tcp`).
+The iPhone app discovers the Mac automatically on the same Wi-Fi, mirrors the
+dashboard, and caches the last snapshot so the widget keeps showing numbers
+when you leave home. Usage percentages only — no tokens or credentials ever
+leave the Mac.
+
+Build and install:
+
+```sh
+cd ios
+xcodegen generate
+open AIUsage.xcodeproj
+```
+
+In Xcode: select your team under Signing & Capabilities (both targets), plug
+in your iPhone, and Run. Then long-press the home screen → add the
+**AI Usage** widget. Open the app once first so iOS grants local-network
+access and the widget has a cached snapshot.
+
 ## Settings (in the dropdown)
 
 - **Show Percentage / Show Battery** — number, or a battery glyph per provider.

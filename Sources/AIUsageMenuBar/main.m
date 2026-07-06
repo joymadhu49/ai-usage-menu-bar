@@ -10,6 +10,9 @@
 #import <Security/Security.h>
 #import <UserNotifications/UserNotifications.h>
 #import <math.h>
+#import <sys/socket.h>
+#import <netinet/in.h>
+#import <unistd.h>
 
 #pragma mark - Defaults keys
 
@@ -50,6 +53,14 @@ static NSString * const CodexNotifyLevelKey = @"codexNotifyLevel";
 // {t: epoch, c: claude 5h used% (-1 when unknown), x: codex primary used%}.
 static NSString * const HistoryKey = @"usageHistory";
 static NSTimeInterval const HistoryWindowSeconds = 24.0 * 3600.0;
+
+// LAN sync server for the iOS companion app: serves the latest provider
+// states as JSON on this port and announces itself over Bonjour so the
+// iPhone can find this Mac automatically. Usage percentages only — no
+// tokens or credentials ever leave the machine.
+static NSString * const SyncServerEnabledKey = @"syncServerEnabled";
+static uint16_t const SyncServerPort = 8737;
+static NSString * const SyncServiceType = @"_aiusage._tcp.";
 
 // Persisted last-good Claude snapshot, so the bar keeps showing real numbers
 // even while the API is unreachable or rate-limiting us.
@@ -271,6 +282,11 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 @property(nonatomic, strong) NSDate *claudeLastGoodFetchedAt;
 @property(nonatomic, strong) NSDate *usageBackoffUntil;
 @property(nonatomic, assign) NSTimeInterval usageBackoffSeconds;
+
+// LAN sync server (iOS companion).
+@property(nonatomic, assign) int syncListenFD;
+@property(nonatomic, strong) dispatch_source_t syncSource;
+@property(nonatomic, strong) NSNetService *syncService;
 @property(nonatomic, strong) NSDictionary *claudeCredsCache;
 @property(nonatomic, strong) NSDate *keychainDenyUntil;
 @end
@@ -291,11 +307,14 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         ShowCodexKey: @YES,
         ShowTimeInBarKey: @NO,
         AlertsEnabledKey: @YES,
+        SyncServerEnabledKey: @YES,
         RefreshIntervalKey: @(DefaultRefreshIntervalSeconds)
     }];
 
     [self restoreClaudeLastGoodState];
     [self requestNotificationAuthorization];
+    self.syncListenFD = -1;
+    [self startSyncServerIfEnabled];
 
     self.claudeIcon = [self claudeMenuBarIcon];
     self.codexIcon = [self codexMenuBarIcon];
@@ -948,6 +967,8 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     [menu addItem:[NSMenuItem separatorItem]];
     [self addChoiceWithTitle:@"Usage Alerts (80% / 95%)" action:@selector(toggleAlerts)
                      checked:[self boolDefault:AlertsEnabledKey] image:[self symbol:@"bell"] toMenu:menu];
+    [self addChoiceWithTitle:@"iPhone Sync (LAN)" action:@selector(toggleSyncServer)
+                     checked:[self boolDefault:SyncServerEnabledKey] image:[self symbol:@"iphone"] toMenu:menu];
     [self addRefreshIntervalSubmenuToMenu:menu];
     [self addChoiceWithTitle:@"Launch at Login" action:@selector(toggleLaunchAtLogin)
                      checked:[self launchAtLoginEnabled] image:[self symbol:@"power"] toMenu:menu];
@@ -1217,6 +1238,103 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
             [self evaluateAlerts];
         });
     });
+}
+
+#pragma mark - LAN sync server (iOS companion app)
+
+// Minimal HTTP server: any GET returns the latest provider states as JSON.
+// Published over Bonjour as _aiusage._tcp so the iPhone app finds this Mac
+// without configuration. Serves usage numbers only — never credentials.
+- (void)startSyncServerIfEnabled {
+    if (![self boolDefault:SyncServerEnabledKey] || self.syncSource != nil) {
+        return;
+    }
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return;
+    }
+    int yes = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(SyncServerPort);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 || listen(fd, 8) != 0) {
+        close(fd);
+        return;
+    }
+
+    self.syncListenFD = fd;
+    dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)fd, 0,
+                                                      dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(source, ^{
+        [weakSelf serveSyncConnection];
+    });
+    dispatch_resume(source);
+    self.syncSource = source;
+
+    self.syncService = [[NSNetService alloc] initWithDomain:@"" type:SyncServiceType name:@"" port:SyncServerPort];
+    [self.syncService publish];
+}
+
+- (void)stopSyncServer {
+    if (self.syncSource != nil) {
+        dispatch_source_cancel(self.syncSource);
+        self.syncSource = nil;
+    }
+    if (self.syncListenFD >= 0) {
+        close(self.syncListenFD);
+        self.syncListenFD = -1;
+    }
+    [self.syncService stop];
+    self.syncService = nil;
+}
+
+- (void)serveSyncConnection {
+    int client = accept(self.syncListenFD, NULL, NULL);
+    if (client < 0) {
+        return;
+    }
+    // Drain whatever request line arrived; every path gets the same payload.
+    char requestBuffer[2048];
+    recv(client, requestBuffer, sizeof(requestBuffer), 0);
+
+    __block NSDictionary *claude = nil;
+    __block NSDictionary *codex = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        claude = self.claudeState;
+        codex = self.codexState;
+    });
+
+    NSDictionary *payload = @{
+        @"v": @1,
+        @"generated_at": @([NSDate date].timeIntervalSince1970),
+        @"claude": claude ?: @{},
+        @"codex": codex ?: @{}
+    };
+    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil] ?: [NSData data];
+    NSString *header = [NSString stringWithFormat:
+        @"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
+        (unsigned long)body.length];
+    NSMutableData *response = [[header dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    [response appendData:body];
+    send(client, response.bytes, response.length, 0);
+    close(client);
+}
+
+- (void)toggleSyncServer {
+    BOOL enabled = ![self boolDefault:SyncServerEnabledKey];
+    [NSUserDefaults.standardUserDefaults setBool:enabled forKey:SyncServerEnabledKey];
+    if (enabled) {
+        [self startSyncServerIfEnabled];
+    } else {
+        [self stopSyncServer];
+    }
+    [self applyAndRebuild];
 }
 
 #pragma mark - Usage alerts
