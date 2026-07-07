@@ -65,6 +65,48 @@ struct HistoryPoint {
     let codexUsed: Double?
 }
 
+// Token usage aggregates scanned from the Mac's local session logs.
+struct TokenStats {
+    let todayTokens: Double
+    let todayCost: Double
+    let totalTokens: Double
+    let totalCost: Double
+
+    static func parse(_ dict: [String: Any]?) -> TokenStats? {
+        guard let dict, let total = (dict["total"] as? NSNumber)?.doubleValue, total > 0 else { return nil }
+        return TokenStats(todayTokens: (dict["today"] as? NSNumber)?.doubleValue ?? 0,
+                          todayCost: (dict["today_cost"] as? NSNumber)?.doubleValue ?? 0,
+                          totalTokens: total,
+                          totalCost: (dict["total_cost"] as? NSNumber)?.doubleValue ?? 0)
+    }
+
+    static func compactCount(_ value: Double) -> String {
+        if value >= 1e9 { return String(format: "%.2fB", value / 1e9) }
+        if value >= 1e6 { return String(format: "%.1fM", value / 1e6) }
+        if value >= 1e3 { return String(format: "%.1fK", value / 1e3) }
+        return String(format: "%.0f", value)
+    }
+
+    static func compactCost(_ value: Double) -> String {
+        if value >= 1000 { return String(format: "~$%.1fK", value / 1000) }
+        if value >= 100 { return String(format: "~$%.0f", value) }
+        return String(format: "~$%.2f", value)
+    }
+
+    // "30.0M today (~$68.98) · 2.02B total (~$5.0K)"
+    func summaryLine(includeCost: Bool) -> String {
+        var line = "\(Self.compactCount(todayTokens)) today"
+        if includeCost && todayCost > 0.005 {
+            line += " (\(Self.compactCost(todayCost)))"
+        }
+        line += " · \(Self.compactCount(totalTokens)) total"
+        if includeCost && totalCost > 0.005 {
+            line += " (\(Self.compactCost(totalCost)))"
+        }
+        return line
+    }
+}
+
 // Parses the JSON served by the Mac menu-bar app's LAN sync server. The
 // provider dictionaries are the app's internal state dictionaries verbatim.
 struct UsageSnapshot {
@@ -72,6 +114,8 @@ struct UsageSnapshot {
     let claude: ProviderSnapshot?
     let codex: ProviderSnapshot?
     let history: [HistoryPoint]
+    let claudeTokens: TokenStats?
+    let codexTokens: TokenStats?
 
     // (date, used%) series for one provider, oldest first.
     func historySeries(claude wantClaude: Bool) -> [(Date, Double)] {
@@ -106,7 +150,11 @@ struct UsageSnapshot {
             }
             history.sort { $0.date < $1.date }
         }
-        return UsageSnapshot(generatedAt: generated, claude: claude, codex: codex, history: history)
+
+        let tokens = root["tokens"] as? [String: Any]
+        return UsageSnapshot(generatedAt: generated, claude: claude, codex: codex, history: history,
+                             claudeTokens: TokenStats.parse(tokens?["claude"] as? [String: Any]),
+                             codexTokens: TokenStats.parse(tokens?["codex"] as? [String: Any]))
     }
 
     private static func provider(from state: [String: Any]?,

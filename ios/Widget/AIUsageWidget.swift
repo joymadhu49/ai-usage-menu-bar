@@ -350,13 +350,15 @@ private struct LargeView: View {
             if let claude = snapshot.claude {
                 providerBlock(provider: claude, icon: ProviderStyle.claudeIcon,
                               tint: ProviderStyle.claudeTint, name: "Claude Code",
-                              series: snapshot.historySeries(claude: true))
+                              series: snapshot.historySeries(claude: true),
+                              tokens: snapshot.claudeTokens, showCost: true)
             }
             Divider()
             if let codex = snapshot.codex {
                 providerBlock(provider: codex, icon: ProviderStyle.codexIcon,
                               tint: .secondary, name: "Codex",
-                              series: snapshot.historySeries(claude: false))
+                              series: snapshot.historySeries(claude: false),
+                              tokens: snapshot.codexTokens, showCost: false)
             }
             Spacer(minLength: 0)
             UpdatedFooter(entry: entry)
@@ -366,7 +368,8 @@ private struct LargeView: View {
 
     @ViewBuilder
     private func providerBlock(provider: ProviderSnapshot, icon: String, tint: Color,
-                               name: String, series: [(Date, Double)]) -> some View {
+                               name: String, series: [(Date, Double)],
+                               tokens: TokenStats?, showCost: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             ProviderHeader(icon: icon, tint: tint, name: name, plan: provider.plan)
             ForEach(provider.rows) { row in
@@ -380,6 +383,13 @@ private struct LargeView: View {
                     HistoryChart(series: series, color: tint == .secondary ? .teal : tint)
                         .frame(height: 30)
                 }
+            }
+            if let tokens {
+                Text("Tokens: \(tokens.summaryLine(includeCost: showCost))")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
             }
             if let extra = provider.extra {
                 Text(extra)

@@ -287,6 +287,12 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 @property(nonatomic, assign) int syncListenFD;
 @property(nonatomic, strong) dispatch_source_t syncSource;
 @property(nonatomic, strong) NSNetService *syncService;
+
+// Token usage aggregates computed from local session logs:
+// {today: tokens, today_cost: $, total: tokens, total_cost: $} per provider.
+@property(nonatomic, strong) NSDictionary *claudeTokenStats;
+@property(nonatomic, strong) NSDictionary *codexTokenStats;
+@property(nonatomic, strong) NSMutableDictionary *tokenCache;
 @property(nonatomic, strong) NSDictionary *claudeCredsCache;
 @property(nonatomic, strong) NSDate *keychainDenyUntil;
 @end
@@ -759,6 +765,10 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
             [self addFooterText:state[@"weekly_sonnet_summary"] toMenu:menu];
         }
     }
+    NSString *claudeTokens = [self tokenLineForStats:self.claudeTokenStats includeCost:YES];
+    if (claudeTokens.length > 0) {
+        [self addFooterText:claudeTokens toMenu:menu];
+    }
     // ?: @"" — a nil element in an @[] literal throws and aborts the menu build.
     [self addFooterText:[self joinSummaries:@[state[@"extra_summary"] ?: @"", state[@"updated_summary"] ?: @""]] toMenu:menu];
     if (![self stateOK:state] && [state[@"error"] isKindOfClass:[NSString class]]) {
@@ -806,6 +816,10 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         [self addFooterText:state[@"monthly_summary"] toMenu:menu];
     }
 
+    NSString *codexTokens = [self tokenLineForStats:self.codexTokenStats includeCost:NO];
+    if (codexTokens.length > 0) {
+        [self addFooterText:codexTokens toMenu:menu];
+    }
     NSString *footer = [self joinSummaries:@[state[@"credits_summary"] ?: @"",
                                              state[@"reset_credits_summary"] ?: @"",
                                              state[@"updated_summary"] ?: @""]];
@@ -1240,6 +1254,15 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 
 - (void)refresh {
     dispatch_queue_t bg = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
+    // Serial queue: token scans mutate the shared cache and must not overlap.
+    static dispatch_queue_t tokenQueue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        tokenQueue = dispatch_queue_create("aiusage.tokenscan", DISPATCH_QUEUE_SERIAL);
+    });
+    dispatch_async(tokenQueue, ^{
+        [self refreshTokenStats];
+    });
     dispatch_async(bg, ^{
         dispatch_group_t group = dispatch_group_create();
         __block NSDictionary *claude = nil;
@@ -1255,6 +1278,270 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
             [self evaluateAlerts];
         });
     });
+}
+
+#pragma mark - Token usage stats (local session logs)
+
+// Claude Code writes per-message token usage into ~/.claude/projects/**/*.jsonl
+// and Codex writes per-turn token_count events into ~/.codex/sessions. We
+// aggregate both into per-day buckets with an incremental per-file cache
+// (only files whose mtime/size changed are re-parsed), then publish
+// today/all-time totals — with an estimated $ cost for Claude based on
+// public API pricing (cost is an estimate: subscription usage isn't billed
+// per token, and Fable pricing is approximated with Opus rates).
+
+- (NSString *)tokenCachePath {
+    NSString *dir = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject
+                     stringByAppendingPathComponent:@"AIUsageMenuBar"];
+    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    return [dir stringByAppendingPathComponent:@"token-cache.json"];
+}
+
+- (NSMutableDictionary *)loadedTokenCache {
+    if (self.tokenCache != nil) {
+        return self.tokenCache;
+    }
+    NSData *data = [NSData dataWithContentsOfFile:[self tokenCachePath]];
+    NSDictionary *saved = data != nil ? [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:nil] : nil;
+    NSMutableDictionary *cache = [saved isKindOfClass:[NSDictionary class]] ? [saved mutableCopy] : [NSMutableDictionary dictionary];
+    if (![cache[@"claude"] isKindOfClass:[NSMutableDictionary class]]) { cache[@"claude"] = [NSMutableDictionary dictionary]; }
+    if (![cache[@"codex"] isKindOfClass:[NSMutableDictionary class]]) { cache[@"codex"] = [NSMutableDictionary dictionary]; }
+    self.tokenCache = cache;
+    return cache;
+}
+
+- (void)saveTokenCache {
+    if (self.tokenCache == nil) { return; }
+    NSData *data = [NSJSONSerialization dataWithJSONObject:self.tokenCache options:0 error:nil];
+    [data writeToFile:[self tokenCachePath] atomically:YES];
+}
+
+// $/MTok pricing by model family: input, output, cache read, cache write.
+- (BOOL)pricingForModel:(NSString *)model into:(double[4])rates {
+    NSString *m = model.lowercaseString ?: @"";
+    if ([m containsString:@"haiku"]) { rates[0] = 1.0; rates[1] = 5.0; rates[2] = 0.10; rates[3] = 1.25; return YES; }
+    if ([m containsString:@"sonnet"]) { rates[0] = 3.0; rates[1] = 15.0; rates[2] = 0.30; rates[3] = 3.75; return YES; }
+    if ([m containsString:@"opus"] || [m containsString:@"fable"] || [m containsString:@"mythos"]) {
+        rates[0] = 15.0; rates[1] = 75.0; rates[2] = 1.50; rates[3] = 18.75; return YES;
+    }
+    if ([m containsString:@"claude"]) { rates[0] = 3.0; rates[1] = 15.0; rates[2] = 0.30; rates[3] = 3.75; return YES; }
+    return NO;
+}
+
+// Re-runs the incremental scan for both providers and publishes the stats.
+// Runs on a background queue; heavy only on the very first scan.
+- (void)refreshTokenStats {
+    NSMutableDictionary *cache = [self loadedTokenCache];
+
+    NSISO8601DateFormatter *iso = [[NSISO8601DateFormatter alloc] init];
+    iso.formatOptions = NSISO8601DateFormatWithInternetDateTime | NSISO8601DateFormatWithFractionalSeconds;
+    NSISO8601DateFormatter *isoPlain = [[NSISO8601DateFormatter alloc] init];
+    isoPlain.formatOptions = NSISO8601DateFormatWithInternetDateTime;
+    NSDateFormatter *dayFormatter = [[NSDateFormatter alloc] init];
+    dayFormatter.dateFormat = @"yyyy-MM-dd";
+
+    NSString *claudeRoot = [@"~/.claude/projects" stringByExpandingTildeInPath];
+    [self scanProvider:@"claude" root:claudeRoot cache:cache iso:iso isoPlain:isoPlain day:dayFormatter];
+
+    NSString *codexHome = NSProcessInfo.processInfo.environment[@"CODEX_HOME"];
+    if (codexHome.length == 0) { codexHome = [@"~/.codex" stringByExpandingTildeInPath]; }
+    [self scanProvider:@"codex" root:[codexHome stringByAppendingPathComponent:@"sessions"] cache:cache iso:iso isoPlain:isoPlain day:dayFormatter];
+
+    [self saveTokenCache];
+
+    NSString *today = [dayFormatter stringFromDate:[NSDate date]];
+    NSDictionary *claudeStats = [self aggregateTokenStatsForProvider:@"claude" cache:cache today:today];
+    NSDictionary *codexStats = [self aggregateTokenStatsForProvider:@"codex" cache:cache today:today];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.claudeTokenStats = claudeStats;
+        self.codexTokenStats = codexStats;
+    });
+}
+
+- (void)scanProvider:(NSString *)provider
+                root:(NSString *)root
+               cache:(NSMutableDictionary *)cache
+                 iso:(NSISO8601DateFormatter *)iso
+            isoPlain:(NSISO8601DateFormatter *)isoPlain
+                 day:(NSDateFormatter *)dayFormatter {
+    NSMutableDictionary *files = cache[provider];
+    NSDirectoryEnumerator<NSURL *> *enumerator =
+        [NSFileManager.defaultManager enumeratorAtURL:[NSURL fileURLWithPath:root]
+                           includingPropertiesForKeys:@[NSURLContentModificationDateKey, NSURLFileSizeKey]
+                                              options:0
+                                         errorHandler:nil];
+    for (NSURL *url in enumerator) {
+        if (![url.pathExtension isEqualToString:@"jsonl"]) { continue; }
+        NSDate *mtime = nil;
+        NSNumber *size = nil;
+        [url getResourceValue:&mtime forKey:NSURLContentModificationDateKey error:nil];
+        [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+
+        NSDictionary *entry = [files[url.path] isKindOfClass:[NSDictionary class]] ? files[url.path] : nil;
+        if (entry != nil &&
+            fabs([entry[@"mtime"] doubleValue] - mtime.timeIntervalSince1970) < 0.5 &&
+            [entry[@"size"] longLongValue] == size.longLongValue) {
+            continue; // unchanged
+        }
+
+        NSDictionary *days = [provider isEqualToString:@"claude"]
+            ? [self claudeDayBucketsForFile:url.path iso:iso isoPlain:isoPlain day:dayFormatter]
+            : [self codexDayBucketsForFile:url.path iso:iso isoPlain:isoPlain day:dayFormatter];
+        files[url.path] = @{
+            @"mtime": @(mtime.timeIntervalSince1970),
+            @"size": size ?: @0,
+            @"days": days ?: @{}
+        };
+    }
+}
+
+// Parses one Claude transcript into {day: {tok, cost}} buckets, deduping
+// streamed duplicates by message id + request id.
+- (NSDictionary *)claudeDayBucketsForFile:(NSString *)path
+                                      iso:(NSISO8601DateFormatter *)iso
+                                 isoPlain:(NSISO8601DateFormatter *)isoPlain
+                                      day:(NSDateFormatter *)dayFormatter {
+    NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    if (content.length == 0) { return @{}; }
+
+    NSMutableDictionary *daysOut = [NSMutableDictionary dictionary];
+    NSMutableSet *seen = [NSMutableSet set];
+    [content enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
+        (void)stop;
+        if (![line containsString:@"\"usage\""] || ![line containsString:@"\"timestamp\""]) { return; }
+        NSDictionary *event = [NSJSONSerialization JSONObjectWithData:[line dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+        if (![event isKindOfClass:[NSDictionary class]]) { return; }
+        NSDictionary *message = [event[@"message"] isKindOfClass:[NSDictionary class]] ? event[@"message"] : nil;
+        NSDictionary *usage = [message[@"usage"] isKindOfClass:[NSDictionary class]] ? message[@"usage"] : nil;
+        if (usage == nil) { return; }
+
+        NSString *messageId = [message[@"id"] isKindOfClass:[NSString class]] ? message[@"id"] : nil;
+        NSString *requestId = [event[@"requestId"] isKindOfClass:[NSString class]] ? event[@"requestId"] : nil;
+        if (messageId != nil || requestId != nil) {
+            NSString *key = [NSString stringWithFormat:@"%@|%@", messageId ?: @"", requestId ?: @""];
+            if ([seen containsObject:key]) { return; }
+            [seen addObject:key];
+        }
+
+        NSString *ts = [event[@"timestamp"] isKindOfClass:[NSString class]] ? event[@"timestamp"] : nil;
+        NSDate *date = ts != nil ? ([iso dateFromString:ts] ?: [isoPlain dateFromString:ts]) : nil;
+        if (date == nil) { return; }
+
+        double input = [usage[@"input_tokens"] doubleValue];
+        double output = [usage[@"output_tokens"] doubleValue];
+        double cacheWrite = [usage[@"cache_creation_input_tokens"] doubleValue];
+        double cacheRead = [usage[@"cache_read_input_tokens"] doubleValue];
+        double tokens = input + output + cacheWrite + cacheRead;
+        if (tokens <= 0) { return; }
+
+        double cost = 0;
+        double rates[4];
+        NSString *model = [message[@"model"] isKindOfClass:[NSString class]] ? message[@"model"] : @"";
+        if ([self pricingForModel:model into:rates]) {
+            cost = (input * rates[0] + output * rates[1] + cacheRead * rates[2] + cacheWrite * rates[3]) / 1e6;
+        }
+
+        NSString *dayKey = [dayFormatter stringFromDate:date];
+        NSDictionary *bucket = daysOut[dayKey];
+        daysOut[dayKey] = @{
+            @"tok": @([bucket[@"tok"] doubleValue] + tokens),
+            @"cost": @([bucket[@"cost"] doubleValue] + cost)
+        };
+    }];
+    return daysOut;
+}
+
+// Parses one Codex session into {day: {tok}} buckets from per-turn
+// last_token_usage payloads.
+- (NSDictionary *)codexDayBucketsForFile:(NSString *)path
+                                     iso:(NSISO8601DateFormatter *)iso
+                                isoPlain:(NSISO8601DateFormatter *)isoPlain
+                                     day:(NSDateFormatter *)dayFormatter {
+    NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    if (content.length == 0) { return @{}; }
+
+    NSMutableDictionary *daysOut = [NSMutableDictionary dictionary];
+    [content enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
+        (void)stop;
+        if (![line containsString:@"token_count"] || ![line containsString:@"last_token_usage"]) { return; }
+        NSDictionary *event = [NSJSONSerialization JSONObjectWithData:[line dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+        if (![event isKindOfClass:[NSDictionary class]]) { return; }
+        NSDictionary *payload = [event[@"payload"] isKindOfClass:[NSDictionary class]] ? event[@"payload"] : nil;
+        NSDictionary *info = [payload[@"info"] isKindOfClass:[NSDictionary class]] ? payload[@"info"] : nil;
+        NSDictionary *last = [info[@"last_token_usage"] isKindOfClass:[NSDictionary class]] ? info[@"last_token_usage"] : nil;
+        if (last == nil) { return; }
+
+        NSString *ts = [event[@"timestamp"] isKindOfClass:[NSString class]] ? event[@"timestamp"] : nil;
+        NSDate *date = ts != nil ? ([iso dateFromString:ts] ?: [isoPlain dateFromString:ts]) : nil;
+        if (date == nil) { return; }
+
+        double tokens = [last[@"total_tokens"] doubleValue];
+        if (tokens <= 0) {
+            tokens = [last[@"input_tokens"] doubleValue] + [last[@"output_tokens"] doubleValue];
+        }
+        if (tokens <= 0) { return; }
+
+        NSString *dayKey = [dayFormatter stringFromDate:date];
+        NSDictionary *bucket = daysOut[dayKey];
+        daysOut[dayKey] = @{ @"tok": @([bucket[@"tok"] doubleValue] + tokens) };
+    }];
+    return daysOut;
+}
+
+- (NSDictionary *)aggregateTokenStatsForProvider:(NSString *)provider cache:(NSDictionary *)cache today:(NSString *)today {
+    double todayTokens = 0, todayCost = 0, totalTokens = 0, totalCost = 0;
+    NSDictionary *files = [cache[provider] isKindOfClass:[NSDictionary class]] ? cache[provider] : @{};
+    for (id path in files) {
+        NSDictionary *days = [files[path][@"days"] isKindOfClass:[NSDictionary class]] ? files[path][@"days"] : @{};
+        for (NSString *dayKey in days) {
+            NSDictionary *bucket = days[dayKey];
+            double tokens = [bucket[@"tok"] doubleValue];
+            double cost = [bucket[@"cost"] doubleValue];
+            totalTokens += tokens;
+            totalCost += cost;
+            if ([dayKey isEqualToString:today]) {
+                todayTokens += tokens;
+                todayCost += cost;
+            }
+        }
+    }
+    if (totalTokens <= 0) { return nil; }
+    return @{
+        @"today": @(todayTokens),
+        @"today_cost": @(todayCost),
+        @"total": @(totalTokens),
+        @"total_cost": @(totalCost)
+    };
+}
+
+// "12.4M" style token counts.
+- (NSString *)compactCount:(double)value {
+    if (value >= 1e9) { return [NSString stringWithFormat:@"%.2fB", value / 1e9]; }
+    if (value >= 1e6) { return [NSString stringWithFormat:@"%.1fM", value / 1e6]; }
+    if (value >= 1e3) { return [NSString stringWithFormat:@"%.1fK", value / 1e3]; }
+    return [NSString stringWithFormat:@"%.0f", value];
+}
+
+- (NSString *)compactCost:(double)value {
+    if (value >= 1000.0) { return [NSString stringWithFormat:@"~$%.1fK", value / 1000.0]; }
+    if (value >= 100.0) { return [NSString stringWithFormat:@"~$%.0f", value]; }
+    return [NSString stringWithFormat:@"~$%.2f", value];
+}
+
+// One compact menu line: "Tokens: 12.4M today (~$23.10) · 1.2B total (~$2.1K)".
+- (NSString *)tokenLineForStats:(NSDictionary *)stats includeCost:(BOOL)includeCost {
+    if (stats == nil) { return nil; }
+    double today = [stats[@"today"] doubleValue];
+    double total = [stats[@"total"] doubleValue];
+    NSMutableString *line = [NSMutableString stringWithFormat:@"Tokens: %@ today", [self compactCount:today]];
+    if (includeCost && [stats[@"today_cost"] doubleValue] > 0.005) {
+        [line appendFormat:@" (%@)", [self compactCost:[stats[@"today_cost"] doubleValue]]];
+    }
+    [line appendFormat:@" · %@ total", [self compactCount:total]];
+    if (includeCost && [stats[@"total_cost"] doubleValue] > 0.005) {
+        [line appendFormat:@" (%@)", [self compactCost:[stats[@"total_cost"] doubleValue]]];
+    }
+    return line;
 }
 
 #pragma mark - LAN sync server (iOS companion app)
@@ -1322,9 +1609,13 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 
     __block NSDictionary *claude = nil;
     __block NSDictionary *codex = nil;
+    __block NSDictionary *claudeTokens = nil;
+    __block NSDictionary *codexTokens = nil;
     dispatch_sync(dispatch_get_main_queue(), ^{
         claude = self.claudeState;
         codex = self.codexState;
+        claudeTokens = self.claudeTokenStats;
+        codexTokens = self.codexTokenStats;
     });
 
     NSDictionary *payload = @{
@@ -1332,6 +1623,10 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         @"generated_at": @([NSDate date].timeIntervalSince1970),
         @"claude": claude ?: @{},
         @"codex": codex ?: @{},
+        @"tokens": @{
+            @"claude": claudeTokens ?: @{},
+            @"codex": codexTokens ?: @{}
+        },
         // 24h sample history {t, c, x} so the phone can draw usage charts.
         @"history": [NSUserDefaults.standardUserDefaults arrayForKey:HistoryKey] ?: @[]
     };

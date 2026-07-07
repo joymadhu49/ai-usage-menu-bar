@@ -11,12 +11,14 @@ struct ContentView: View {
                     if let claude = snapshot.claude {
                         ProviderSection(provider: claude, icon: "rays",
                                         tint: Color(red: 0.87, green: 0.48, blue: 0.34),
-                                        series: snapshot.historySeries(claude: true))
+                                        series: snapshot.historySeries(claude: true),
+                                        tokens: snapshot.claudeTokens, showCost: true)
                     }
                     if let codex = snapshot.codex {
                         ProviderSection(provider: codex, icon: "chevron.left.forwardslash.chevron.right",
                                         tint: .teal,
-                                        series: snapshot.historySeries(claude: false))
+                                        series: snapshot.historySeries(claude: false),
+                                        tokens: snapshot.codexTokens, showCost: false)
                     }
                     statusFooter
                 } else {
@@ -105,6 +107,8 @@ private struct ProviderSection: View {
     let icon: String
     let tint: Color
     let series: [(Date, Double)]
+    let tokens: TokenStats?
+    let showCost: Bool
 
     var body: some View {
         Section {
@@ -121,6 +125,19 @@ private struct ProviderSection: View {
                         .frame(height: 44)
                 }
                 .padding(.vertical, 2)
+            }
+            if let tokens {
+                HStack(spacing: 10) {
+                    Text("Tokens")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 52, alignment: .leading)
+                    Text(tokens.summaryLine(includeCost: showCost))
+                        .font(.caption.weight(.medium))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
             }
             if let extra = provider.extra {
                 Text(extra)
