@@ -56,7 +56,10 @@ private func resetText(_ date: Date?) -> String? {
     if Calendar.current.isDateInToday(date) {
         return date.formatted(date: .omitted, time: .shortened)
     }
-    return date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+    if date.timeIntervalSinceNow < 6.5 * 86400 {
+        return date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+    }
+    return date.formatted(.dateTime.month(.abbreviated).day())
 }
 
 private struct BarView: View {

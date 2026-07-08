@@ -832,7 +832,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 #pragma mark - Styled info rows
 
 - (void)addHeaderRowWithIcon:(NSImage *)icon title:(NSString *)title trailing:(NSString *)trailing toMenu:(NSMenu *)menu {
-    AIMHeaderRow *view = [[AIMHeaderRow alloc] initWithFrame:NSMakeRect(0.0, 0.0, AIMRowWidth, 24.0)];
+    AIMHeaderRow *view = [[AIMHeaderRow alloc] initWithFrame:NSMakeRect(0.0, 0.0, AIMRowWidth, 22.0)];
     view.autoresizingMask = NSViewWidthSizable;
     view.icon = icon;
     view.title = title;
@@ -843,7 +843,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 }
 
 - (void)addUsageRowWithLabel:(NSString *)label used:(double)used value:(NSString *)value toMenu:(NSMenu *)menu {
-    AIMUsageRow *view = [[AIMUsageRow alloc] initWithFrame:NSMakeRect(0.0, 0.0, AIMRowWidth, 21.0)];
+    AIMUsageRow *view = [[AIMUsageRow alloc] initWithFrame:NSMakeRect(0.0, 0.0, AIMRowWidth, 20.0)];
     view.autoresizingMask = NSViewWidthSizable;
     view.label = label;
     view.usedPercent = used;
@@ -859,7 +859,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     if (points.count < 3) {
         return;
     }
-    AIMSparkRow *view = [[AIMSparkRow alloc] initWithFrame:NSMakeRect(0.0, 0.0, AIMRowWidth, 20.0)];
+    AIMSparkRow *view = [[AIMSparkRow alloc] initWithFrame:NSMakeRect(0.0, 0.0, AIMRowWidth, 16.0)];
     view.autoresizingMask = NSViewWidthSizable;
     view.label = @"24h";
     view.points = points;
@@ -889,7 +889,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     double used = [self usedPercentForState:state secondary:secondary];
     NSString *metric = [self shortMetricTextForUsed:used];
     NSNumber *reset = [self resetSecondsForState:state secondary:secondary];
-    NSString *clock = [self clockTextForSeconds:reset];
+    NSString *clock = [self shortResetLabelForSeconds:reset];
     if (clock.length == 0) {
         NSString *missing = claude ? [self claudeMissingResetReasonForState:state secondary:secondary] : @"—";
         return [NSString stringWithFormat:@"%@ · %@", metric, missing];
@@ -901,11 +901,29 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 - (NSString *)scopedUsageValueForRow:(NSDictionary *)row {
     NSString *metric = [self shortMetricTextForUsed:[row[@"used_percent"] doubleValue]];
     NSNumber *reset = [row[@"resets_at"] respondsToSelector:@selector(doubleValue)] ? row[@"resets_at"] : nil;
-    NSString *clock = [self clockTextForSeconds:reset];
+    NSString *clock = [self shortResetLabelForSeconds:reset];
     if (clock.length == 0) {
         return metric;
     }
     return [NSString stringWithFormat:@"%@ · %@", metric, clock];
+}
+
+// Reset label that always disambiguates the day: "4:11 PM" only when the
+// reset is today, "Thu 1:59 PM" within a week, "Jul 21" beyond that.
+- (NSString *)shortResetLabelForSeconds:(NSNumber *)seconds {
+    if (seconds == nil) {
+        return nil;
+    }
+    NSDate *date = [NSDate dateWithTimeIntervalSince1970:seconds.doubleValue];
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    if ([NSCalendar.currentCalendar isDateInToday:date]) {
+        [formatter setLocalizedDateFormatFromTemplate:@"j:mm"];
+    } else if ([date timeIntervalSinceNow] < 6.5 * 86400.0) {
+        [formatter setLocalizedDateFormatFromTemplate:@"EEE j:mm"];
+    } else {
+        [formatter setLocalizedDateFormatFromTemplate:@"MMM d"];
+    }
+    return [formatter stringFromDate:date];
 }
 
 - (NSString *)shortMetricTextForUsed:(double)used {
@@ -2622,6 +2640,11 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         NSString *limitId = [self stringFromDictionary:snapshot keys:@[@"limitId"]] ?: [key description];
         if (preferredId.length > 0 && [limitId isEqualToString:preferredId]) { continue; }
         NSString *name = [self stringFromDictionary:snapshot keys:@[@"limitName", @"limitId"]] ?: [key description];
+        // Long model names crowd the row label; "GPT-5.3-Codex-Spark" -> "Spark".
+        if (name.length > 10 && [name containsString:@"-"]) {
+            NSString *tail = [name componentsSeparatedByString:@"-"].lastObject;
+            if (tail.length >= 3) { name = tail; }
+        }
         for (NSString *windowKey in @[@"primary", @"secondary"]) {
             NSDictionary *window = [self windowForSnapshot:snapshot key:windowKey];
             NSNumber *used = [self numberFromDictionary:window keys:@[@"usedPercent"]];
@@ -2808,7 +2831,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     if (![resetCredits isKindOfClass:[NSDictionary class]]) { return nil; }
     NSNumber *available = [self numberFromDictionary:resetCredits keys:@[@"availableCount"]];
     if (available == nil) { return nil; }
-    return [NSString stringWithFormat:@"Usage resets: %ld available", (long)available.integerValue];
+    return [NSString stringWithFormat:@"Usage resets: %ld", (long)available.integerValue];
 }
 
 - (NSString *)monthlySummary:(NSDictionary *)monthly {
