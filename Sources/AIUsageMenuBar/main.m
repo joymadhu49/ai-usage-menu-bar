@@ -38,6 +38,7 @@ static NSString * const CodexWindowWeekly = @"weekly"; // secondary
 
 static NSString * const ShowClaudeKey = @"showClaude";
 static NSString * const ShowCodexKey = @"showCodex";
+static NSString * const ShowGrokKey = @"showGrok";
 static NSString * const ShowTimeInBarKey = @"showTimeInBar";
 
 static NSString * const RefreshIntervalKey = @"refreshIntervalSeconds";
@@ -48,6 +49,7 @@ static NSTimeInterval const DefaultRefreshIntervalSeconds = 300.0;
 static NSString * const AlertsEnabledKey = @"alertsEnabled";
 static NSString * const ClaudeNotifyLevelKey = @"claudeNotifyLevel";
 static NSString * const CodexNotifyLevelKey = @"codexNotifyLevel";
+static NSString * const GrokNotifyLevelKey = @"grokNotifyLevel";
 
 // Rolling 24h of usage samples for the sparkline rows: array of
 // {t: epoch, c: claude 5h used% (-1 when unknown), x: codex primary used%}.
@@ -270,9 +272,11 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 
 @property(nonatomic, strong) NSDictionary *claudeState;
 @property(nonatomic, strong) NSDictionary *codexState;
+@property(nonatomic, strong) NSDictionary *grokState;
 
 @property(nonatomic, strong) NSImage *claudeIcon;
 @property(nonatomic, strong) NSImage *codexIcon;
+@property(nonatomic, strong) NSImage *grokIcon;
 @property(nonatomic, copy) NSString *launchAtLoginError;
 
 // Claude network resilience (token refresh throttle, rate-limit cool-down,
@@ -311,6 +315,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         CodexWindowKey: CodexWindowDaily,
         ShowClaudeKey: @YES,
         ShowCodexKey: @YES,
+        ShowGrokKey: @YES,
         ShowTimeInBarKey: @NO,
         AlertsEnabledKey: @YES,
         SyncServerEnabledKey: @YES,
@@ -324,6 +329,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 
     self.claudeIcon = [self claudeMenuBarIcon];
     self.codexIcon = [self codexMenuBarIcon];
+    self.grokIcon = [self grokMenuBarIcon];
 
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
     self.statusItem.button.image = [self barImage];
@@ -397,6 +403,41 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     return [self codexFallbackIcon];
 }
 
+// A stylized X mark for Grok (xAI): a full diagonal stroke crossed by two
+// offset half-strokes, echoing the xAI wordmark.
+- (NSImage *)grokMenuBarIcon {
+    NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(16.0, 16.0)];
+    [image lockFocus];
+    [NSColor.blackColor set];
+    CGFloat inset = 3.0;
+    CGFloat w = 1.8;
+
+    NSBezierPath *main = [NSBezierPath bezierPath];
+    main.lineWidth = w;
+    main.lineCapStyle = NSLineCapStyleRound;
+    [main moveToPoint:NSMakePoint(inset, 16.0 - inset)];
+    [main lineToPoint:NSMakePoint(16.0 - inset, inset)];
+    [main stroke];
+
+    NSBezierPath *upper = [NSBezierPath bezierPath];
+    upper.lineWidth = w;
+    upper.lineCapStyle = NSLineCapStyleRound;
+    [upper moveToPoint:NSMakePoint(inset, inset)];
+    [upper lineToPoint:NSMakePoint(7.0, 7.0)];
+    [upper stroke];
+
+    NSBezierPath *lower = [NSBezierPath bezierPath];
+    lower.lineWidth = w;
+    lower.lineCapStyle = NSLineCapStyleRound;
+    [lower moveToPoint:NSMakePoint(9.0, 9.0)];
+    [lower lineToPoint:NSMakePoint(16.0 - inset, 16.0 - inset)];
+    [lower stroke];
+
+    [image unlockFocus];
+    image.template = YES;
+    return image;
+}
+
 // A simple ">_" terminal glyph if the Codex app icon isn't installed.
 - (NSImage *)codexFallbackIcon {
     NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(16.0, 16.0)];
@@ -457,6 +498,13 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
             @"icon": self.codexIcon ?: [NSNull null],
             @"metric": @([self barMetricForState:self.codexState secondary:[self codexUsesSecondary]]),
             @"used": @([self stateOK:self.codexState] ? [self usedPercentForState:self.codexState secondary:[self codexUsesSecondary]] : NAN)
+        }];
+    }
+    if ([self boolDefault:ShowGrokKey] && [self stateOK:self.grokState]) {
+        [readouts addObject:@{
+            @"icon": self.grokIcon ?: [NSNull null],
+            @"metric": @([self barMetricForState:self.grokState secondary:NO]),
+            @"used": @([self usedPercentForState:self.grokState secondary:NO])
         }];
     }
     if (readouts.count == 0) {
@@ -626,6 +674,10 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         NSNumber *r = [self resetSecondsForState:self.codexState secondary:[self codexUsesSecondary]];
         if (r != nil) { [resets addObject:r]; }
     }
+    if ([self boolDefault:ShowGrokKey] && [self stateOK:self.grokState]) {
+        NSNumber *r = [self resetSecondsForState:self.grokState secondary:NO];
+        if (r != nil) { [resets addObject:r]; }
+    }
     if (resets.count == 0) {
         return nil;
     }
@@ -705,6 +757,8 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         [self addClaudeSectionToMenu:menu];
         [menu addItem:[NSMenuItem separatorItem]];
         [self addCodexSectionToMenu:menu];
+        [menu addItem:[NSMenuItem separatorItem]];
+        [self addGrokSectionToMenu:menu];
     } @catch (NSException *exception) {
         [self addFooterText:[NSString stringWithFormat:@"⚠ Menu error: %@", exception.reason ?: exception.name]
                      toMenu:menu];
@@ -824,6 +878,30 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
                                              state[@"reset_credits_summary"] ?: @"",
                                              state[@"updated_summary"] ?: @""]];
     [self addFooterText:footer toMenu:menu];
+    if (![self stateOK:state] && [state[@"error"] isKindOfClass:[NSString class]]) {
+        [self addFooterText:[NSString stringWithFormat:@"⚠ %@", state[@"error"]] toMenu:menu];
+    }
+}
+
+- (void)addGrokSectionToMenu:(NSMenu *)menu {
+    NSDictionary *state = self.grokState;
+
+    [self addHeaderRowWithIcon:self.grokIcon
+                         title:@"Grok"
+                      trailing:[self planValueForState:state]
+                        toMenu:menu];
+
+    NSString *label = [state[@"primary_window_label"] isKindOfClass:[NSString class]] ? state[@"primary_window_label"] : @"7d";
+    [self addUsageRowWithLabel:label
+                          used:[self usedPercentForState:state secondary:NO]
+                         value:[self usageValueForState:state secondary:NO claude:NO]
+                       toMenu:menu];
+    [self addSparkRowForField:@"g" toMenu:menu];
+    if ([state[@"monthly_summary"] isKindOfClass:[NSString class]]) {
+        [self addFooterText:state[@"monthly_summary"] toMenu:menu];
+    }
+    [self addFooterText:[self joinSummaries:@[state[@"credits_summary"] ?: @"",
+                                              state[@"updated_summary"] ?: @""]] toMenu:menu];
     if (![self stateOK:state] && [state[@"error"] isKindOfClass:[NSString class]]) {
         [self addFooterText:[NSString stringWithFormat:@"⚠ %@", state[@"error"]] toMenu:menu];
     }
@@ -986,6 +1064,8 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
                      checked:[self boolDefault:ShowClaudeKey] image:self.claudeIcon toMenu:menu];
     [self addChoiceWithTitle:@"Show Codex" action:@selector(toggleShowCodex)
                      checked:[self boolDefault:ShowCodexKey] image:self.codexIcon toMenu:menu];
+    [self addChoiceWithTitle:@"Show Grok" action:@selector(toggleShowGrok)
+                     checked:[self boolDefault:ShowGrokKey] image:self.grokIcon toMenu:menu];
     [self addChoiceWithTitle:@"Show Reset Time" action:@selector(toggleShowTimeInBar)
                      checked:[self boolDefault:ShowTimeInBarKey] image:[self symbol:@"clock"] toMenu:menu];
 
@@ -1230,6 +1310,10 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     [NSUserDefaults.standardUserDefaults setBool:![self boolDefault:ShowCodexKey] forKey:ShowCodexKey];
     [self applyAndRebuild];
 }
+- (void)toggleShowGrok {
+    [NSUserDefaults.standardUserDefaults setBool:![self boolDefault:ShowGrokKey] forKey:ShowGrokKey];
+    [self applyAndRebuild];
+}
 - (void)toggleShowTimeInBar {
     [NSUserDefaults.standardUserDefaults setBool:![self boolDefault:ShowTimeInBarKey] forKey:ShowTimeInBarKey];
     [self applyAndRebuild];
@@ -1285,17 +1369,94 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         dispatch_group_t group = dispatch_group_create();
         __block NSDictionary *claude = nil;
         __block NSDictionary *codex = nil;
+        __block NSDictionary *grok = nil;
         dispatch_group_async(group, bg, ^{ claude = [self loadClaudeState]; });
         dispatch_group_async(group, bg, ^{ codex = [self loadCodexState]; });
+        dispatch_group_async(group, bg, ^{ grok = [self loadGrokState]; });
         dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
         dispatch_async(dispatch_get_main_queue(), ^{
             self.claudeState = claude;
             self.codexState = codex;
+            self.grokState = grok;
             [self updateStatusItem];
             [self recordHistorySample];
             [self evaluateAlerts];
         });
     });
+}
+
+#pragma mark - Grok data source: grok CLI billing log
+
+// The grok CLI periodically logs its billing snapshot ("billing: fetched
+// credits config") into ~/.grok/logs/unified.jsonl with creditUsagePercent
+// and the current usage period. We read the newest one — fully local, no
+// xAI credentials touched. Only updates while the grok CLI runs.
+- (NSDictionary *)loadGrokState {
+    NSString *path = [@"~/.grok/logs/unified.jsonl" stringByExpandingTildeInPath];
+    NSData *data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
+    if (data.length == 0) {
+        return @{ @"ok": @NO, @"error": @"grok CLI log not found (is Grok installed?)" };
+    }
+
+    NSUInteger tailBytes = MIN(data.length, (NSUInteger)(2 * 1024 * 1024));
+    NSData *tail = [data subdataWithRange:NSMakeRange(data.length - tailBytes, tailBytes)];
+    NSString *text = [[NSString alloc] initWithData:tail encoding:NSUTF8StringEncoding];
+    for (NSString *line in [[text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet] reverseObjectEnumerator]) {
+        if (![line containsString:@"billing: fetched credits config"]) { continue; }
+        NSDictionary *event = [NSJSONSerialization JSONObjectWithData:[line dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+        if (![event isKindOfClass:[NSDictionary class]]) { continue; }
+        NSDictionary *ctx = [event[@"ctx"] isKindOfClass:[NSDictionary class]] ? event[@"ctx"] : nil;
+        NSDictionary *config = [ctx[@"config"] isKindOfClass:[NSDictionary class]] ? ctx[@"config"] : nil;
+        NSNumber *used = [self numberFromDictionary:config keys:@[@"creditUsagePercent"]];
+        if (used == nil) { continue; }
+
+        NSMutableDictionary *state = [@{
+            @"ok": @YES,
+            @"primary_used_percent": @(MAX(0.0, MIN(100.0, used.doubleValue))),
+            @"source_summary": @"Source: grok CLI log",
+            @"updated_summary": [self updatedSummaryForDate:[self dateFromISOString:event[@"ts"]]]
+        } mutableCopy];
+
+        NSDictionary *period = [config[@"currentPeriod"] isKindOfClass:[NSDictionary class]] ? config[@"currentPeriod"] : nil;
+        NSString *periodType = [self stringFromDictionary:period keys:@[@"type"]];
+        state[@"primary_window_label"] = [periodType containsString:@"MONTHLY"] ? @"30d" : @"7d";
+        NSDate *reset = [self grokDateFromISO:[self stringFromDictionary:period keys:@[@"end"]]
+                                    ?: [self stringFromDictionary:config keys:@[@"billingPeriodEnd"]]];
+        if (reset != nil) {
+            state[@"primary_resets_at"] = @(reset.timeIntervalSince1970);
+        }
+
+        NSDictionary *prepaid = [config[@"prepaidBalance"] isKindOfClass:[NSDictionary class]] ? config[@"prepaidBalance"] : nil;
+        NSNumber *balance = [self numberFromDictionary:prepaid keys:@[@"val"]];
+        if (balance != nil && balance.doubleValue > 0) {
+            state[@"credits_summary"] = [NSString stringWithFormat:@"Prepaid: $%.2f", balance.doubleValue];
+        }
+        NSDictionary *cap = [config[@"onDemandCap"] isKindOfClass:[NSDictionary class]] ? config[@"onDemandCap"] : nil;
+        NSDictionary *odUsed = [config[@"onDemandUsed"] isKindOfClass:[NSDictionary class]] ? config[@"onDemandUsed"] : nil;
+        NSNumber *capValue = [self numberFromDictionary:cap keys:@[@"val"]];
+        if (capValue != nil && capValue.doubleValue > 0) {
+            state[@"monthly_summary"] = [NSString stringWithFormat:@"On-demand: $%.2f of $%.2f",
+                                         [self numberFromDictionary:odUsed keys:@[@"val"]].doubleValue,
+                                         capValue.doubleValue];
+        }
+        return state;
+    }
+    return @{ @"ok": @NO, @"error": @"Run the grok CLI once to record usage" };
+}
+
+// Grok timestamps carry 6-digit fractional seconds ("...21.288181+00:00"),
+// which NSISO8601DateFormatter rejects — strip the fraction before parsing.
+- (NSDate *)grokDateFromISO:(NSString *)value {
+    if (![value isKindOfClass:[NSString class]] || value.length == 0) {
+        return nil;
+    }
+    NSString *stripped = [value stringByReplacingOccurrencesOfString:@"\\.\\d+"
+                                                          withString:@""
+                                                             options:NSRegularExpressionSearch
+                                                               range:NSMakeRange(0, value.length)];
+    NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init];
+    formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime;
+    return [formatter dateFromString:stripped] ?: [self dateFromISOString:value];
 }
 
 #pragma mark - Token usage stats (local session logs)
@@ -1627,11 +1788,13 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 
     __block NSDictionary *claude = nil;
     __block NSDictionary *codex = nil;
+    __block NSDictionary *grok = nil;
     __block NSDictionary *claudeTokens = nil;
     __block NSDictionary *codexTokens = nil;
     dispatch_sync(dispatch_get_main_queue(), ^{
         claude = self.claudeState;
         codex = self.codexState;
+        grok = self.grokState;
         claudeTokens = self.claudeTokenStats;
         codexTokens = self.codexTokenStats;
     });
@@ -1641,6 +1804,7 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
         @"generated_at": @([NSDate date].timeIntervalSince1970),
         @"claude": claude ?: @{},
         @"codex": codex ?: @{},
+        @"grok": grok ?: @{},
         @"tokens": @{
             @"claude": claudeTokens ?: @{},
             @"codex": codexTokens ?: @{}
@@ -1696,6 +1860,10 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
                        state:self.codexState
                    secondary:[self codexUsesSecondary]
                   defaultKey:CodexNotifyLevelKey];
+    [self evaluateAlertNamed:@"Grok"
+                       state:self.grokState
+                   secondary:NO
+                  defaultKey:GrokNotifyLevelKey];
 }
 
 // Fires once at 80% and once at 95% of the tracked window; re-arms when usage
@@ -1755,7 +1923,8 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
 - (void)recordHistorySample {
     double claudeUsed = [self stateOK:self.claudeState] ? [self usedPercentForState:self.claudeState secondary:NO] : NAN;
     double codexUsed = [self stateOK:self.codexState] ? [self usedPercentForState:self.codexState secondary:NO] : NAN;
-    if (isnan(claudeUsed) && isnan(codexUsed)) {
+    double grokUsed = [self stateOK:self.grokState] ? [self usedPercentForState:self.grokState secondary:NO] : NAN;
+    if (isnan(claudeUsed) && isnan(codexUsed) && isnan(grokUsed)) {
         return;
     }
 
@@ -1773,7 +1942,8 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     [history addObject:@{
         @"t": @(now),
         @"c": @(isnan(claudeUsed) ? -1.0 : claudeUsed),
-        @"x": @(isnan(codexUsed) ? -1.0 : codexUsed)
+        @"x": @(isnan(codexUsed) ? -1.0 : codexUsed),
+        @"g": @(isnan(grokUsed) ? -1.0 : grokUsed)
     }];
     // Hard cap as a safety net against pathological refresh rates.
     while (history.count > 4000) {

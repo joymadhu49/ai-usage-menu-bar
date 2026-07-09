@@ -40,7 +40,9 @@ struct UsageProvider: TimelineProvider {
 private enum ProviderStyle {
     static let claudeIcon = "rays"
     static let codexIcon = "chevron.left.forwardslash.chevron.right"
+    static let grokIcon = "multiply"
     static let claudeTint = Color(red: 0.87, green: 0.48, blue: 0.34)
+    static let grokTint = Color.indigo
 }
 
 private func severityColor(_ severity: Severity) -> Color {
@@ -129,7 +131,11 @@ private struct InlineView: View {
     var body: some View {
         let claude = snapshot.claude?.rows.first.map { "\(Int($0.leftPercent.rounded()))%" } ?? "--"
         let codex = snapshot.codex?.rows.first.map { "\(Int($0.leftPercent.rounded()))%" } ?? "--"
-        Text("Claude \(claude) · Codex \(codex)")
+        if let grok = snapshot.grok?.rows.first.map({ "\(Int($0.leftPercent.rounded()))%" }) {
+            Text("Claude \(claude) · Codex \(codex) · Grok \(grok)")
+        } else {
+            Text("Claude \(claude) · Codex \(codex)")
+        }
     }
 }
 
@@ -144,6 +150,9 @@ private struct RectangularView: View {
             }
             if let row = snapshot.codex?.rows.first {
                 line(icon: ProviderStyle.codexIcon, name: "Codex", row: row)
+            }
+            if let row = snapshot.grok?.rows.first {
+                line(icon: ProviderStyle.grokIcon, name: "Grok", row: row)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -172,19 +181,28 @@ private struct RectangularView: View {
 private struct SmallView: View {
     let snapshot: UsageSnapshot
 
+    private var providerCount: Int {
+        [snapshot.claude != nil, snapshot.codex != nil, snapshot.grok != nil].filter { $0 }.count
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        // With all three providers the reset captions don't fit a small widget.
+        let compact = providerCount >= 3
+        VStack(alignment: .leading, spacing: compact ? 9 : 12) {
             if let claude = snapshot.claude, let row = claude.rows.first {
-                headline(icon: ProviderStyle.claudeIcon, tint: ProviderStyle.claudeTint, name: "Claude", row: row)
+                headline(icon: ProviderStyle.claudeIcon, tint: ProviderStyle.claudeTint, name: "Claude", row: row, showReset: !compact)
             }
             if let codex = snapshot.codex, let row = codex.rows.first {
-                headline(icon: ProviderStyle.codexIcon, tint: .secondary, name: "Codex", row: row)
+                headline(icon: ProviderStyle.codexIcon, tint: .secondary, name: "Codex", row: row, showReset: !compact)
+            }
+            if let grok = snapshot.grok, let row = grok.rows.first {
+                headline(icon: ProviderStyle.grokIcon, tint: ProviderStyle.grokTint, name: "Grok", row: row, showReset: !compact)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 
-    private func headline(icon: String, tint: Color, name: String, row: UsageRow) -> some View {
+    private func headline(icon: String, tint: Color, name: String, row: UsageRow, showReset: Bool = true) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 5) {
                 Image(systemName: icon)
@@ -200,7 +218,7 @@ private struct SmallView: View {
                     .foregroundStyle(severityColor(row.severity))
             }
             BarView(row: row)
-            if let reset = resetText(row.resetsAt) {
+            if showReset, let reset = resetText(row.resetsAt) {
                 Text("resets \(reset)")
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
@@ -319,7 +337,8 @@ private struct MediumView: View {
 
     var body: some View {
         // Both columns share the same slot count so their rows line up.
-        let slots = min(2, max(snapshot.claude?.rows.count ?? 0, snapshot.codex?.rows.count ?? 0))
+        let slots = min(2, max(snapshot.claude?.rows.count ?? 0,
+                               max(snapshot.codex?.rows.count ?? 0, snapshot.grok?.rows.count ?? 0)))
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 14) {
                 if let claude = snapshot.claude {
@@ -334,6 +353,12 @@ private struct MediumView: View {
                     ProviderColumn(icon: ProviderStyle.codexIcon, tint: .secondary,
                                    name: "Codex", plan: codex.plan,
                                    rows: Array(codex.rows.prefix(2)), slots: slots, showResets: false)
+                }
+                if let grok = snapshot.grok {
+                    Divider()
+                    ProviderColumn(icon: ProviderStyle.grokIcon, tint: ProviderStyle.grokTint,
+                                   name: "Grok", plan: grok.plan,
+                                   rows: Array(grok.rows.prefix(2)), slots: slots, showResets: false)
                 }
             }
             Spacer(minLength: 0)
@@ -353,15 +378,22 @@ private struct LargeView: View {
             if let claude = snapshot.claude {
                 providerBlock(provider: claude, icon: ProviderStyle.claudeIcon,
                               tint: ProviderStyle.claudeTint, name: "Claude Code",
-                              series: snapshot.historySeries(claude: true),
+                              series: snapshot.historySeries(field: "c"),
                               tokens: snapshot.claudeTokens, showCost: true)
             }
             Divider()
             if let codex = snapshot.codex {
                 providerBlock(provider: codex, icon: ProviderStyle.codexIcon,
                               tint: .secondary, name: "Codex",
-                              series: snapshot.historySeries(claude: false),
+                              series: snapshot.historySeries(field: "x"),
                               tokens: snapshot.codexTokens, showCost: false)
+            }
+            if let grok = snapshot.grok {
+                Divider()
+                providerBlock(provider: grok, icon: ProviderStyle.grokIcon,
+                              tint: ProviderStyle.grokTint, name: "Grok",
+                              series: snapshot.historySeries(field: "g"),
+                              tokens: nil, showCost: false)
             }
             Spacer(minLength: 0)
             UpdatedFooter(entry: entry)
@@ -456,6 +488,13 @@ struct CodexRingView: View {
     }
 }
 
+struct GrokRingView: View {
+    let entry: UsageEntry
+    var body: some View {
+        RingView(name: "Grok", icon: ProviderStyle.grokIcon, row: entry.snapshot?.grok?.rows.first)
+    }
+}
+
 // MARK: - Widget declarations
 
 struct AIUsageWidget: Widget {
@@ -491,11 +530,23 @@ struct CodexRingWidget: Widget {
     }
 }
 
+struct GrokRingWidget: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: "AIUsageGrokRing", provider: UsageProvider()) { entry in
+            GrokRingView(entry: entry)
+        }
+        .configurationDisplayName("Grok Ring")
+        .description("Grok weekly % left at a glance.")
+        .supportedFamilies([.systemSmall, .accessoryCircular])
+    }
+}
+
 @main
 struct AIUsageWidgetBundle: WidgetBundle {
     var body: some Widget {
         AIUsageWidget()
         ClaudeRingWidget()
         CodexRingWidget()
+        GrokRingWidget()
     }
 }

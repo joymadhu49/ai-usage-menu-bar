@@ -11,14 +11,20 @@ struct ContentView: View {
                     if let claude = snapshot.claude {
                         ProviderSection(provider: claude, icon: "rays",
                                         tint: Color(red: 0.87, green: 0.48, blue: 0.34),
-                                        series: snapshot.historySeries(claude: true),
+                                        series: snapshot.historySeries(field: "c"),
                                         tokens: snapshot.claudeTokens, showCost: true)
                     }
                     if let codex = snapshot.codex {
                         ProviderSection(provider: codex, icon: "chevron.left.forwardslash.chevron.right",
                                         tint: .teal,
-                                        series: snapshot.historySeries(claude: false),
+                                        series: snapshot.historySeries(field: "x"),
                                         tokens: snapshot.codexTokens, showCost: false)
+                    }
+                    if let grok = snapshot.grok {
+                        ProviderSection(provider: grok, icon: "multiply",
+                                        tint: .indigo,
+                                        series: snapshot.historySeries(field: "g"),
+                                        tokens: nil, showCost: false)
                     }
                     statusFooter
                 } else {

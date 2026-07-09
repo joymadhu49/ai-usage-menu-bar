@@ -63,6 +63,7 @@ struct HistoryPoint {
     let date: Date
     let claudeUsed: Double?
     let codexUsed: Double?
+    let grokUsed: Double?
 }
 
 // Token usage aggregates scanned from the Mac's local session logs.
@@ -113,14 +114,21 @@ struct UsageSnapshot {
     let generatedAt: Date
     let claude: ProviderSnapshot?
     let codex: ProviderSnapshot?
+    let grok: ProviderSnapshot?
     let history: [HistoryPoint]
     let claudeTokens: TokenStats?
     let codexTokens: TokenStats?
 
-    // (date, used%) series for one provider, oldest first.
-    func historySeries(claude wantClaude: Bool) -> [(Date, Double)] {
+    // (date, used%) series for one provider field ("c"/"x"/"g"), oldest first.
+    func historySeries(field: String) -> [(Date, Double)] {
         history.compactMap { point in
-            guard let value = wantClaude ? point.claudeUsed : point.codexUsed else { return nil }
+            let value: Double?
+            switch field {
+            case "c": value = point.claudeUsed
+            case "x": value = point.codexUsed
+            default: value = point.grokUsed
+            }
+            guard let value else { return nil }
             return (point.date, value)
         }
     }
@@ -134,7 +142,9 @@ struct UsageSnapshot {
                               name: "Claude Code", defaultPrimary: "5h", defaultSecondary: "7d", scoped: true)
         let codex = provider(from: root["codex"] as? [String: Any],
                              name: "Codex", defaultPrimary: "5h", defaultSecondary: "7d", scoped: true)
-        if claude == nil && codex == nil {
+        let grok = provider(from: root["grok"] as? [String: Any],
+                            name: "Grok", defaultPrimary: "7d", defaultSecondary: "7d", scoped: false)
+        if claude == nil && codex == nil && grok == nil {
             return nil
         }
 
@@ -144,15 +154,17 @@ struct UsageSnapshot {
                 guard let t = (entry["t"] as? NSNumber)?.doubleValue else { continue }
                 let c = (entry["c"] as? NSNumber)?.doubleValue
                 let x = (entry["x"] as? NSNumber)?.doubleValue
+                let g = (entry["g"] as? NSNumber)?.doubleValue
                 history.append(HistoryPoint(date: Date(timeIntervalSince1970: t),
                                             claudeUsed: (c ?? -1) >= 0 ? c : nil,
-                                            codexUsed: (x ?? -1) >= 0 ? x : nil))
+                                            codexUsed: (x ?? -1) >= 0 ? x : nil,
+                                            grokUsed: (g ?? -1) >= 0 ? g : nil))
             }
             history.sort { $0.date < $1.date }
         }
 
         let tokens = root["tokens"] as? [String: Any]
-        return UsageSnapshot(generatedAt: generated, claude: claude, codex: codex, history: history,
+        return UsageSnapshot(generatedAt: generated, claude: claude, codex: codex, grok: grok, history: history,
                              claudeTokens: TokenStats.parse(tokens?["claude"] as? [String: Any]),
                              codexTokens: TokenStats.parse(tokens?["codex"] as? [String: Any]))
     }
