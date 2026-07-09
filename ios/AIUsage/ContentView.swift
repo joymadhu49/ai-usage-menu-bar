@@ -21,7 +21,7 @@ struct ContentView: View {
                                         tokens: snapshot.codexTokens, showCost: false)
                     }
                     if let grok = snapshot.grok {
-                        ProviderSection(provider: grok, icon: "multiply",
+                        ProviderSection(provider: grok, icon: "grok",
                                         tint: .indigo,
                                         series: snapshot.historySeries(field: "g"),
                                         tokens: nil, showCost: false)
@@ -152,7 +152,8 @@ private struct ProviderSection: View {
             }
         } header: {
             HStack {
-                Label(provider.name, systemImage: icon)
+                ProviderGlyph(icon: icon, size: 13)
+                Text(provider.name)
                 Spacer()
                 if let plan = provider.plan {
                     Text(plan.uppercased())

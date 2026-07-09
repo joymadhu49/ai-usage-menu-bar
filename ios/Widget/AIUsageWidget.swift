@@ -40,7 +40,7 @@ struct UsageProvider: TimelineProvider {
 private enum ProviderStyle {
     static let claudeIcon = "rays"
     static let codexIcon = "chevron.left.forwardslash.chevron.right"
-    static let grokIcon = "multiply"
+    static let grokIcon = "grok"
     static let claudeTint = Color(red: 0.87, green: 0.48, blue: 0.34)
     static let grokTint = Color.indigo
 }
@@ -161,8 +161,7 @@ private struct RectangularView: View {
     private func line(icon: String, name: String, row: UsageRow) -> some View {
         GridRow {
             HStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 10, weight: .semibold))
+                ProviderGlyph(icon: icon, size: 10)
                 Text(name)
                     .font(.caption2.weight(.medium))
             }
@@ -205,8 +204,7 @@ private struct SmallView: View {
     private func headline(icon: String, tint: Color, name: String, row: UsageRow, showReset: Bool = true) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 5) {
-                Image(systemName: icon)
-                    .font(.caption2.weight(.semibold))
+                ProviderGlyph(icon: icon, size: 11)
                     .foregroundStyle(tint)
                 Text(name)
                     .font(.caption2.weight(.medium))
@@ -235,8 +233,7 @@ private struct ProviderHeader: View {
 
     var body: some View {
         HStack(spacing: 5) {
-            Image(systemName: icon)
-                .font(.caption.weight(.semibold))
+            ProviderGlyph(icon: icon, size: 12)
                 .foregroundStyle(tint)
             Text(name)
                 .font(.caption.weight(.semibold))
@@ -335,30 +332,58 @@ private struct MediumView: View {
     let snapshot: UsageSnapshot
     let entry: UsageEntry
 
+    private struct Line: Identifiable {
+        let id = UUID()
+        let icon: String
+        let tint: Color
+        let name: String?
+        let row: UsageRow
+    }
+
+    // One full-width line per window, provider name only on its first line —
+    // avoids the squeezed columns that truncate names with three providers.
+    private var lines: [Line] {
+        var result: [Line] = []
+        let providers: [(String, Color, String, ProviderSnapshot?)] = [
+            (ProviderStyle.claudeIcon, ProviderStyle.claudeTint, "Claude", snapshot.claude),
+            (ProviderStyle.codexIcon, Color.secondary, "Codex", snapshot.codex),
+            (ProviderStyle.grokIcon, ProviderStyle.grokTint, "Grok", snapshot.grok)
+        ]
+        for (icon, tint, name, provider) in providers {
+            guard let provider else { continue }
+            for (index, row) in provider.rows.prefix(2).enumerated() {
+                result.append(Line(icon: icon, tint: tint, name: index == 0 ? name : nil, row: row))
+            }
+        }
+        return result
+    }
+
     var body: some View {
-        // Both columns share the same slot count so their rows line up.
-        let slots = min(2, max(snapshot.claude?.rows.count ?? 0,
-                               max(snapshot.codex?.rows.count ?? 0, snapshot.grok?.rows.count ?? 0)))
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: 14) {
-                if let claude = snapshot.claude {
-                    ProviderColumn(icon: ProviderStyle.claudeIcon, tint: ProviderStyle.claudeTint,
-                                   name: "Claude", plan: claude.plan,
-                                   rows: Array(claude.rows.prefix(2)), slots: slots, showResets: false)
-                }
-                if snapshot.claude != nil && snapshot.codex != nil {
-                    Divider()
-                }
-                if let codex = snapshot.codex {
-                    ProviderColumn(icon: ProviderStyle.codexIcon, tint: .secondary,
-                                   name: "Codex", plan: codex.plan,
-                                   rows: Array(codex.rows.prefix(2)), slots: slots, showResets: false)
-                }
-                if let grok = snapshot.grok {
-                    Divider()
-                    ProviderColumn(icon: ProviderStyle.grokIcon, tint: ProviderStyle.grokTint,
-                                   name: "Grok", plan: grok.plan,
-                                   rows: Array(grok.rows.prefix(2)), slots: slots, showResets: false)
+        VStack(alignment: .leading, spacing: 7) {
+            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 7) {
+                ForEach(lines) { line in
+                    GridRow {
+                        HStack(spacing: 4) {
+                            if let name = line.name {
+                                ProviderGlyph(icon: line.icon, size: 10)
+                                    .foregroundStyle(line.tint)
+                                Text(name)
+                                    .font(.caption2.weight(.semibold))
+                            }
+                        }
+                        .frame(minWidth: 54, alignment: .leading)
+                        Text(line.row.label)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .gridColumnAlignment(.trailing)
+                        BarView(row: line.row)
+                            .frame(minWidth: 60, maxWidth: .infinity)
+                        Text("\(Int(line.row.leftPercent.rounded()))% left")
+                            .font(.caption2.weight(.semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(severityColor(line.row.severity))
+                            .gridColumnAlignment(.trailing)
+                    }
                 }
             }
             Spacer(minLength: 0)
@@ -456,8 +481,7 @@ private struct RingView: View {
                 .stroke(color, style: StrokeStyle(lineWidth: isSmall ? 10 : 5, lineCap: .round))
                 .rotationEffect(.degrees(-90))
             VStack(spacing: isSmall ? 3 : 0) {
-                Image(systemName: icon)
-                    .font(isSmall ? .callout : .system(size: 9))
+                ProviderGlyph(icon: icon, size: isSmall ? 15 : 9)
                     .foregroundStyle(.secondary)
                 Text(row != nil ? "\(Int(left.rounded()))%" : "--")
                     .font(isSmall ? .title2.weight(.semibold) : .caption2.weight(.semibold))

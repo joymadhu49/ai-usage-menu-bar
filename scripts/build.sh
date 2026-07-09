@@ -32,6 +32,11 @@ if [[ -f /Applications/Claude.app/Contents/Resources/electron.icns ]]; then
   cp /Applications/Claude.app/Contents/Resources/electron.icns "$RESOURCES_DIR/AppIcon.icns"
 fi
 
+# Bundle the Grok logo for the menu bar icon.
+if [[ -f "$ROOT_DIR/assets/grok.svg" ]]; then
+  cp "$ROOT_DIR/assets/grok.svg" "$RESOURCES_DIR/grok.svg"
+fi
+
 cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

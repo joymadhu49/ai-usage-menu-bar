@@ -403,35 +403,45 @@ static void AIMDrawTemplateImage(NSImage *image, NSRect rect, NSColor *color) {
     return [self codexFallbackIcon];
 }
 
-// A stylized X mark for Grok (xAI): a full diagonal stroke crossed by two
-// offset half-strokes, echoing the xAI wordmark.
+// The official Grok mark, bundled as an SVG (macOS renders SVG natively in
+// NSImage). Falls back to a drawn approximation — a circle split by a long
+// diagonal slash — if the resource is missing.
 - (NSImage *)grokMenuBarIcon {
+    NSString *svgPath = [NSBundle.mainBundle pathForResource:@"grok" ofType:@"svg"];
+    if (svgPath != nil) {
+        NSImage *svg = [[NSImage alloc] initWithContentsOfFile:svgPath];
+        if (svg != nil) {
+            svg.template = YES;
+            svg.size = NSMakeSize(16.0, 16.0);
+            return svg;
+        }
+    }
+
     NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(16.0, 16.0)];
     [image lockFocus];
     [NSColor.blackColor set];
-    CGFloat inset = 3.0;
-    CGFloat w = 1.8;
+    CGFloat w = 1.6;
+    NSPoint center = NSMakePoint(8.0, 8.0);
+    CGFloat radius = 4.9;
 
-    NSBezierPath *main = [NSBezierPath bezierPath];
-    main.lineWidth = w;
-    main.lineCapStyle = NSLineCapStyleRound;
-    [main moveToPoint:NSMakePoint(inset, 16.0 - inset)];
-    [main lineToPoint:NSMakePoint(16.0 - inset, inset)];
-    [main stroke];
+    NSBezierPath *upperArc = [NSBezierPath bezierPath];
+    upperArc.lineWidth = w;
+    upperArc.lineCapStyle = NSLineCapStyleRound;
+    [upperArc appendBezierPathWithArcWithCenter:center radius:radius startAngle:72.0 endAngle:198.0];
+    [upperArc stroke];
 
-    NSBezierPath *upper = [NSBezierPath bezierPath];
-    upper.lineWidth = w;
-    upper.lineCapStyle = NSLineCapStyleRound;
-    [upper moveToPoint:NSMakePoint(inset, inset)];
-    [upper lineToPoint:NSMakePoint(7.0, 7.0)];
-    [upper stroke];
+    NSBezierPath *lowerArc = [NSBezierPath bezierPath];
+    lowerArc.lineWidth = w;
+    lowerArc.lineCapStyle = NSLineCapStyleRound;
+    [lowerArc appendBezierPathWithArcWithCenter:center radius:radius startAngle:252.0 endAngle:18.0];
+    [lowerArc stroke];
 
-    NSBezierPath *lower = [NSBezierPath bezierPath];
-    lower.lineWidth = w;
-    lower.lineCapStyle = NSLineCapStyleRound;
-    [lower moveToPoint:NSMakePoint(9.0, 9.0)];
-    [lower lineToPoint:NSMakePoint(16.0 - inset, 16.0 - inset)];
-    [lower stroke];
+    NSBezierPath *slash = [NSBezierPath bezierPath];
+    slash.lineWidth = w;
+    slash.lineCapStyle = NSLineCapStyleRound;
+    [slash moveToPoint:NSMakePoint(1.2, 1.2)];
+    [slash lineToPoint:NSMakePoint(14.8, 14.8)];
+    [slash stroke];
 
     [image unlockFocus];
     image.template = YES;
